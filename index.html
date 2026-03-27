@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Minds' Craft — Admin Portal</title>
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/css/all.min.css" />
+  <link rel="stylesheet" href="css/variables.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/modules.css" />
+</head>
+<body>
+
+<!-- ===================== LOGIN SCREEN ===================== -->
+<div id="login-screen" class="login-screen hidden">
+  <div class="login-card">
+    <div class="login-logo">
+      <img src="assets/logo.svg" alt="Minds' Craft" class="login-logo-img" />
+      <span class="login-logo-text">Minds' Craft</span>
+    </div>
+    <h2 class="login-title">Admin Portal</h2>
+    <p class="login-subtitle">Sign in to manage your robotics center</p>
+
+    <div id="login-error" class="alert alert-error hidden"></div>
+
+    <form id="login-form" class="login-form">
+      <div class="form-group">
+        <label class="form-label">Email Address</label>
+        <div class="input-icon-wrap">
+          <i class="fas fa-envelope input-icon"></i>
+          <input type="email" id="login-email" class="form-input" placeholder="admin@mindscraft.com" required />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password</label>
+        <div class="input-icon-wrap">
+          <i class="fas fa-lock input-icon"></i>
+          <input type="password" id="login-password" class="form-input" placeholder="••••••••" required />
+          <button type="button" class="input-icon-right toggle-pw" onclick="togglePw()">
+            <i class="fas fa-eye"></i>
+          </button>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary btn-full" id="login-btn">
+        <span class="btn-text">Sign In</span>
+        <span class="btn-spinner hidden"><i class="fas fa-spinner fa-spin"></i></span>
+      </button>
+    </form>
+
+    <div class="login-footer">
+      <p>Secure Admin Access · Minds' Craft © 2025</p>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== MAIN APP ===================== -->
+<div id="app" class="app-layout hidden">
+
+  <!-- SIDEBAR -->
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <div class="sidebar-logo">
+        <img src="assets/logo.svg" alt="MC" class="sidebar-logo-img" />
+        <span class="sidebar-logo-text">Minds' Craft</span>
+      </div>
+      <button class="sidebar-close" onclick="toggleSidebar()"><i class="fas fa-times"></i></button>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-page="dashboard">
+        <i class="fas fa-chart-pie nav-icon"></i><span>Dashboard</span>
+      </a>
+      <a href="#" class="nav-item" data-page="users">
+        <i class="fas fa-users nav-icon"></i><span>Users</span>
+      </a>
+      <a href="#" class="nav-item" data-page="courses">
+        <i class="fas fa-graduation-cap nav-icon"></i><span>Courses</span>
+      </a>
+      <a href="#" class="nav-item" data-page="attendance">
+        <i class="fas fa-clipboard-check nav-icon"></i><span>Attendance</span>
+      </a>
+      <a href="#" class="nav-item" data-page="trainers">
+        <i class="fas fa-chalkboard-teacher nav-icon"></i><span>Trainers</span>
+      </a>
+      <a href="#" class="nav-item" data-page="events">
+        <i class="fas fa-calendar-alt nav-icon"></i><span>Events</span>
+      </a>
+      <a href="#" class="nav-item" data-page="financials">
+        <i class="fas fa-dollar-sign nav-icon"></i><span>Financials</span>
+      </a>
+      <a href="#" class="nav-item" data-page="notifications">
+        <i class="fas fa-bell nav-icon"></i><span>Notifications</span>
+      </a>
+      <a href="#" class="nav-item" data-page="progress">
+        <i class="fas fa-chart-line nav-icon"></i><span>Student Progress</span>
+      </a>
+      <a href="#" class="nav-item" data-page="settings">
+        <i class="fas fa-cog nav-icon"></i><span>Settings</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-pill">
+        <div class="user-avatar" id="sidebar-avatar">A</div>
+        <div class="user-info">
+          <div class="user-name" id="sidebar-name">Admin</div>
+          <div class="user-role">Super Admin</div>
+        </div>
+      </div>
+      <button class="btn-logout" onclick="App.logout()" title="Logout">
+        <i class="fas fa-sign-out-alt"></i>
+      </button>
+    </div>
+  </aside>
+
+  <!-- SIDEBAR OVERLAY -->
+  <div id="sidebar-overlay" class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-content">
+
+    <!-- TOP BAR -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="topbar-menu-btn" onclick="toggleSidebar()">
+          <i class="fas fa-bars"></i>
+        </button>
+        <h1 class="page-title" id="page-title">Dashboard</h1>
+      </div>
+      <div class="topbar-right">
+        <button class="topbar-icon-btn theme-toggle" onclick="toggleTheme()" title="Toggle Theme">
+          <i class="fas fa-moon" id="theme-icon"></i>
+        </button>
+        <div class="notif-btn-wrap">
+          <button class="topbar-icon-btn" onclick="App.navigate('notifications')">
+            <i class="fas fa-bell"></i>
+            <span class="notif-badge hidden" id="notif-badge">0</span>
+          </button>
+        </div>
+        <div class="topbar-avatar" id="topbar-avatar">A</div>
+      </div>
+    </header>
+
+    <!-- PAGE CONTAINER -->
+    <main class="page-container" id="page-container">
+      <div class="page-loading">
+        <i class="fas fa-spinner fa-spin"></i>
+        <p>Loading…</p>
+      </div>
+    </main>
+  </div>
+</div>
+
+<!-- ===================== GLOBAL MODAL ===================== -->
+<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal(event)">
+  <div class="modal" id="modal-box">
+    <div class="modal-header">
+      <h3 id="modal-title">Modal Title</h3>
+      <button class="modal-close" onclick="Modal.close()"><i class="fas fa-times"></i></button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<!-- ===================== TOAST CONTAINER ===================== -->
+<div id="toast-container" class="toast-container"></div>
+
+<!-- ===================== SCRIPTS ===================== -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<script src="js/config.js"></script>
+<script src="js/db.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/modal.js"></script>
+<script src="js/pages/dashboard.js"></script>
+<script src="js/pages/users.js"></script>
+<script src="js/pages/courses.js"></script>
+<script src="js/pages/attendance.js"></script>
+<script src="js/pages/trainers.js"></script>
+<script src="js/pages/events.js"></script>
+<script src="js/pages/financials.js"></script>
+<script src="js/pages/notifications.js"></script>
+<script src="js/pages/progress.js"></script>
+<script src="js/pages/settings.js"></script>
+<script src="js/app.js"></script>
+
+<script src="https://www.genspark.ai/sandbox_inspect.js"></script></body>
+</html>
