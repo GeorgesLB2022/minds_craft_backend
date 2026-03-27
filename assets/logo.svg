@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none">
+  <!-- Gear 1 (blue) -->
+  <g transform="translate(50,60)">
+    <circle cx="0" cy="0" r="22" fill="#3b82f6" opacity="0.9"/>
+    <circle cx="0" cy="0" r="10" fill="#1d2333"/>
+    <rect x="-4" y="-28" width="8" height="12" rx="3" fill="#3b82f6" opacity="0.9"/>
+    <rect x="-4" y="16" width="8" height="12" rx="3" fill="#3b82f6" opacity="0.9"/>
+    <rect x="16" y="-4" width="12" height="8" rx="3" fill="#3b82f6" opacity="0.9"/>
+    <rect x="-28" y="-4" width="12" height="8" rx="3" fill="#3b82f6" opacity="0.9"/>
+  </g>
+  <!-- Gear 2 (green) -->
+  <g transform="translate(100,90)">
+    <circle cx="0" cy="0" r="28" fill="#22c55e" opacity="0.9"/>
+    <circle cx="0" cy="0" r="12" fill="#1d2333"/>
+    <rect x="-5" y="-35" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9"/>
+    <rect x="-5" y="21" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9"/>
+    <rect x="21" y="-5" width="14" height="10" rx="3" fill="#22c55e" opacity="0.9"/>
+    <rect x="-35" y="-5" width="14" height="10" rx="3" fill="#22c55e" opacity="0.9"/>
+    <rect x="-3" y="-35" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9" transform="rotate(45,0,0)"/>
+    <rect x="-3" y="-35" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9" transform="rotate(90,0,0)"/>
+    <rect x="-3" y="-35" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9" transform="rotate(135,0,0)"/>
+    <rect x="-3" y="-35" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9" transform="rotate(225,0,0)"/>
+    <rect x="-3" y="-35" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9" transform="rotate(270,0,0)"/>
+    <rect x="-3" y="-35" width="10" height="14" rx="3" fill="#22c55e" opacity="0.9" transform="rotate(315,0,0)"/>
+  </g>
+  <!-- Gear 3 (purple) -->
+  <g transform="translate(148,55)">
+    <circle cx="0" cy="0" r="20" fill="#6366f1" opacity="0.9"/>
+    <circle cx="0" cy="0" r="9" fill="#1d2333"/>
+    <rect x="-3.5" y="-26" width="7" height="11" rx="2.5" fill="#6366f1" opacity="0.9"/>
+    <rect x="-3.5" y="15" width="7" height="11" rx="2.5" fill="#6366f1" opacity="0.9"/>
+    <rect x="15" y="-3.5" width="11" height="7" rx="2.5" fill="#6366f1" opacity="0.9"/>
+    <rect x="-26" y="-3.5" width="11" height="7" rx="2.5" fill="#6366f1" opacity="0.9"/>
+    <rect x="-3.5" y="-26" width="7" height="11" rx="2.5" fill="#6366f1" opacity="0.9" transform="rotate(45,0,0)"/>
+    <rect x="-3.5" y="-26" width="7" height="11" rx="2.5" fill="#6366f1" opacity="0.9" transform="rotate(135,0,0)"/>
+    <rect x="-3.5" y="-26" width="7" height="11" rx="2.5" fill="#6366f1" opacity="0.9" transform="rotate(225,0,0)"/>
+    <rect x="-3.5" y="-26" width="7" height="11" rx="2.5" fill="#6366f1" opacity="0.9" transform="rotate(315,0,0)"/>
+  </g>
+</svg>
