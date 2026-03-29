@@ -211,17 +211,14 @@ const NotificationsPage = {
           <div class="card">
             <div class="card-header">
               <div class="card-title">Notification History</div>
-              <div style="display:flex;gap:6px;align-items:center">
-                <input type="text" id="log-search" class="form-input form-input-sm"
-                  placeholder="Search…" style="width:130px"
-                  oninput="NotificationsPage.filterLogs(this.value)" />
-                <button class="btn btn-ghost btn-sm" onclick="NotificationsPage.loadLogs()">
-                  <i class="fas fa-sync"></i>
-                </button>
-              </div>
+              <button class="btn btn-secondary btn-sm" onclick="NotificationsPage.openHistoryModal()">
+                <i class="fas fa-history"></i> View History
+              </button>
             </div>
-            <div id="notif-history">
-              <div class="empty-state"><i class="fas fa-spinner fa-spin"></i></div>
+            <div style="padding:1rem;text-align:center;color:var(--text-muted);font-size:var(--font-size-sm)">
+              <i class="fas fa-history" style="font-size:2rem;opacity:.3;display:block;margin-bottom:.5rem"></i>
+              Click <strong>View History</strong> to see all sent notifications,
+              grouped by time period.
             </div>
           </div>
         </div>
@@ -808,6 +805,84 @@ const NotificationsPage = {
   },
 
   // ─────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────
+  // TRIGGER RULE — fires active rules matching a trigger event
+  // Called externally: NotificationsPage.triggerRule('on_payment', { ... })
+  // ─────────────────────────────────────────────────────────
+  async triggerRule(triggerEvent, data = {}) {
+    // Load rules if not already loaded
+    if (!this.rules || !this.rules.length) {
+      const { data: rules } = await DB.getNotificationRules();
+      this.rules = rules || [];
+    }
+
+    const matchingRules = this.rules.filter(
+      r => r.is_active && r.trigger_event === triggerEvent
+    );
+    if (!matchingRules.length) return; // no active rule for this event — silent exit
+
+    // Build template variables from data
+    const vars = {
+      fname:        data.fname        || data.full_name?.split(' ')[0] || '',
+      lname:        data.lname        || data.full_name?.split(' ').slice(1).join(' ') || '',
+      full_name:    data.full_name    || '',
+      email:        data.email        || '',
+      phone:        data.phone        || '',
+      package:      data.package      || '',
+      amount:       data.amount       !== undefined ? String(data.amount) : '',
+      start_date:   data.start_date   ? Utils.formatDate(data.start_date)   : '',
+      end_date:     data.end_date     ? Utils.formatDate(data.end_date)     : '',
+      expiry_date:  data.end_date     ? Utils.formatDate(data.end_date)     : '',
+    };
+
+    for (const rule of matchingRules) {
+      for (const ch of (rule.channels || ['email'])) {
+        const template = ch === 'email' ? rule.email_template : rule.sms_template;
+        const body     = this._fillTemplate(
+          template || this._defaultTriggerMsg(triggerEvent, vars), vars
+        );
+        const subject  = rule.title || `Notification — Minds' Craft`;
+
+        let ok = false;
+
+        if (ch === 'sms' && data.phone) {
+          const res = await this._sendSMS(data.phone, body);
+          ok = res.ok;
+        } else if (ch === 'email' && data.email && this._ejsReady()) {
+          const res = await this._sendEmail(data.email, subject, body, vars.fname || vars.full_name);
+          ok = res.ok;
+        }
+
+        await DB.logNotification({
+          rule_id:           rule.id,
+          recipient_id:      data.student_id || data.id || null,
+          recipient_name:    data.full_name  || data.name || '',
+          recipient_contact: ch === 'sms' ? data.phone : data.email,
+          channel:           ch,
+          subject:           subject,
+          body:              body,
+          status:            ok ? 'sent' : 'failed',
+        });
+      }
+    }
+
+    // Refresh history if the notifications page is currently open
+    if (document.getElementById('notif-history')) await this.loadLogs();
+  },
+
+  _defaultTriggerMsg(triggerEvent, vars) {
+    if (triggerEvent === 'on_payment') {
+      return `Hi ${vars.fname}, your payment for "${vars.package}" has been received.`
+        + (vars.amount    ? ` Amount: $${vars.amount}.`           : '')
+        + (vars.end_date  ? ` Valid until: ${vars.expiry_date}.`  : '');
+    }
+    if (triggerEvent === 'on_student_created') {
+      return `Welcome to Minds' Craft, ${vars.fname}! Your account has been created successfully.`;
+    }
+    return `Hi ${vars.fname}, you have a new notification from Minds' Craft.`;
+  },
+
+  // ─────────────────────────────────────────────────────────
   // EXPIRY CHECK — 2 days before end_date, sent once per allocation
   // ─────────────────────────────────────────────────────────
   async runExpiryCheck(silent = false) {
@@ -820,36 +895,55 @@ const NotificationsPage = {
       return;
     }
 
-    const today   = new Date(); today.setHours(0,0,0,0);
-    const target  = new Date(today); target.setDate(today.getDate() + 2); // 2 days ahead
+    // Use local date strings (YYYY-MM-DD) — no timezone issues
+    const localToday = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const toDateStr = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    const addDays = (date, days) => {
+      const d = new Date(date); d.setDate(d.getDate() + days); return toDateStr(d);
+    };
+    const todayStr = toDateStr(localToday);
+    // Window: today (0), tomorrow (1), or 2 days from now (2)
+    // This way if you missed opening the app on time, the reminder still fires
+    const windowDates = new Set([
+      todayStr,
+      addDays(localToday, 1),
+      addDays(localToday, 2),
+    ]);
 
-    // Fetch active allocations expiring on target date
+    // Fetch all active allocations
     const { data: allocations } = await DB.getAll('student_allocations', {
       select: '*, student:student_id(id, full_name, email, phone), package:package_id(name)',
       filter: { status: 'active' },
     });
 
+    // Find allocations whose end_date falls within the 0–2 day window
     const expiring = (allocations || []).filter(a => {
       if (!a.end_date) return false;
-      const d = new Date(a.end_date); d.setHours(0,0,0,0);
-      return d.getTime() === target.getTime();
+      return windowDates.has(a.end_date.slice(0, 10));
     });
 
     if (!expiring.length) {
-      if (!silent) Toast.info('No subscriptions expiring in exactly 2 days.');
+      if (!silent) Toast.info(`No subscriptions expiring within 2 days (checked: ${todayStr} to ${addDays(localToday, 2)}).`);
       return;
     }
 
-    // For each expiring allocation, check if we already sent a reminder for it today.
-    // We tag each log with subject '[EXPIRY REMINDER]' and store alloc end_date in body prefix.
+    // ── Dedup: fetch ALL expiry reminder logs ever sent ───────────────
+    // Key format: "studentId__YYYY-MM-DD" (student id + allocation end_date)
+    // If this exact key exists in logs → reminder was already sent → skip forever.
     const { data: recentLogs } = await DB.getAll('notification_logs', {
       filter: { subject: '[EXPIRY REMINDER]' },
-      limit: 1000,
+      limit: 5000,
     });
 
-    // Key = studentId + endDate (so one reminder per allocation end-date, per student)
+    // Build set from logs: recipient_id + end_date extracted from body prefix
     const alreadySent = new Set(
-      (recentLogs || []).map(l => `${l.recipient_id}__${(l.body || '').slice(0, 10)}`)
+      (recentLogs || [])
+        .filter(l => l.recipient_id && l.body)
+        .map(l => {
+          const endDate = (l.body || '').slice(0, 10); // body starts with "YYYY-MM-DD — ..."
+          return `${l.recipient_id}__${endDate}`;
+        })
     );
 
     let sent = 0;
@@ -858,8 +952,10 @@ const NotificationsPage = {
         const student = alloc.student;
         if (!student) continue;
 
+        // This key is unique per student + per allocation end_date
+        // Once logged, this reminder will NEVER be sent again for this allocation
         const key = `${student.id}__${alloc.end_date}`;
-        if (alreadySent.has(key)) continue; // already sent once for this allocation
+        if (alreadySent.has(key)) continue; // already sent — skip forever
 
         const vars = {
           fname:       student.full_name?.split(' ')[0] || student.full_name || '',
@@ -872,11 +968,15 @@ const NotificationsPage = {
 
         for (const ch of (rule.channels || ['email'])) {
           const template = ch === 'email' ? rule.email_template : rule.sms_template;
-          const body = this._fillTemplate(template || this._defaultExpiryMsg(vars), vars);
+          const body     = this._fillTemplate(template || this._defaultExpiryMsg(vars), vars);
+          const subject  = rule.title || "Subscription Expiring Soon — Minds' Craft";
 
-          let ok = true;
+          let ok = false;
           if (ch === 'sms' && student.phone) {
             const res = await this._sendSMS(student.phone, body);
+            ok = res.ok;
+          } else if (ch === 'email' && student.email && this._ejsReady()) {
+            const res = await this._sendEmail(student.email, subject, body, vars.fname);
             ok = res.ok;
           }
 
@@ -917,110 +1017,405 @@ const NotificationsPage = {
   _allLogs: [],
 
   async loadLogs() {
-    const { data } = await DB.getNotificationLogs({ limit: 100 });
+    const { data } = await DB.getNotificationLogs({ limit: 200 });
     this._allLogs = data || [];
-    this._renderLogs(this._allLogs);
   },
 
-  filterLogs(q) {
-    const term = (q || '').toLowerCase().trim();
-    const filtered = term
-      ? this._allLogs.filter(l =>
-          (l.recipient_name || '').toLowerCase().includes(term) ||
-          (l.recipient_contact || '').toLowerCase().includes(term) ||
-          (l.subject || '').toLowerCase().includes(term) ||
-          (l.channel || '').toLowerCase().includes(term)
-        )
-      : this._allLogs;
-    this._renderLogs(filtered);
+  // ─────────────────────────────────────────────────────────
+  // NOTIFICATION HISTORY MODAL
+  // ─────────────────────────────────────────────────────────
+  async openHistoryModal() {
+    // Show loading modal immediately
+    Modal.open('Notification History', `
+      <div style="text-align:center;padding:2rem">
+        <i class="fas fa-spinner fa-spin" style="font-size:2rem;color:var(--brand-primary)"></i>
+        <p style="margin-top:.75rem;color:var(--text-muted)">Loading history…</p>
+      </div>
+    `, { size: 'xl' });
+
+    // Fetch fresh logs
+    const { data } = await DB.getNotificationLogs({ limit: 500 });
+    this._allLogs = data || [];
+    this._renderHistoryModal(this._allLogs);
   },
 
-  _renderLogs(logs) {
-    const el = document.getElementById('notif-history');
-    if (!el) return;
+  // Build just the grouped rows HTML — used by both initial render and search filter
+  _buildGroupsHTML(logs) {
+    const chIcon  = { email:'fa-envelope', sms:'fa-comment-sms', push:'fa-bell', whatsapp:'fa-whatsapp' };
+    const chColor = { email:'#6366f1',     sms:'#22c55e',        push:'#f59e0b', whatsapp:'#25d366'     };
+    const chBg    = { email:'rgba(99,102,241,.12)', sms:'rgba(34,197,94,.12)',
+                      push:'rgba(245,158,11,.12)',  whatsapp:'rgba(37,211,102,.12)' };
 
-    if (!logs.length) {
-      el.innerHTML = `<div class="empty-state" style="padding:2rem 0">
-        <i class="fas fa-inbox"></i><p>No notifications yet</p></div>`;
-      return;
-    }
+    // ── Group logs by time period ─────────────────────────────
+    const now      = new Date();
+    const groups   = { Today:[], Yesterday:[], 'This Week':[], 'This Month':[], Older:[] };
+    const todayStr = now.toDateString();
+    const yesterdayStr = new Date(now - 86400000).toDateString();
+    const weekAgo  = new Date(now - 7  * 86400000);
+    const monthAgo = new Date(now - 30 * 86400000);
 
-    const chIcon = { email:'fa-envelope', sms:'fa-sms', push:'fa-bell', whatsapp:'fa-whatsapp' };
-    const chColor = { email:'#6366f1', sms:'#22c55e', push:'#f59e0b', whatsapp:'#25d366' };
+    logs.forEach(l => {
+      const d = new Date(l.sent_at || l.created_at);
+      const ds = d.toDateString();
+      if (ds === todayStr)              groups['Today'].push(l);
+      else if (ds === yesterdayStr)     groups['Yesterday'].push(l);
+      else if (d >= weekAgo)            groups['This Week'].push(l);
+      else if (d >= monthAgo)           groups['This Month'].push(l);
+      else                              groups['Older'].push(l);
+    });
 
-    el.innerHTML = logs.map((l, idx) => {
-      const icon  = chIcon[l.channel] || 'fa-paper-plane';
-      const color = chColor[l.channel] || 'var(--text-muted)';
-      const when  = l.sent_at
-        ? new Date(l.sent_at).toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' })
-        : '—';
-      const ago   = l.sent_at ? Utils.timeAgo(l.sent_at) : '';
+    // ── Build group HTML ──────────────────────────────────────
+    const buildGroup = (label, items) => {
+      if (!items.length) return '';
+      const rows = items.map((l, idx) => {
+        const icon  = chIcon[l.channel]  || 'fa-paper-plane';
+        const color = chColor[l.channel] || 'var(--text-muted)';
+        const bg    = chBg[l.channel]    || 'rgba(156,163,175,.1)';
+        const d     = new Date(l.sent_at || l.created_at);
+        const timeStr = d.toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+        const dateStr = d.toLocaleDateString('en-GB', { day:'2-digit', month:'short', year:'numeric' });
+        const isEmail = l.channel === 'email';
+        const uid = `hlog-${label.replace(/\s/g,'')}-${idx}`;
+        // Clean body — remove date prefix added by expiry check
+        const cleanBody = (l.body || '').replace(/^\d{4}-\d{2}-\d{2}\s*—\s*/, '');
 
-      return `
-        <div class="notif-log-row" id="log-row-${idx}" onclick="NotificationsPage.toggleLogDetail(${idx})"
-          style="padding:10px 0;border-bottom:1px solid var(--border-light);cursor:pointer">
-          <div style="display:flex;align-items:center;gap:10px">
-            <!-- Channel icon -->
-            <div style="width:32px;height:32px;border-radius:50%;background:${color}18;
-              display:flex;align-items:center;justify-content:center;flex-shrink:0">
-              <i class="fa${l.channel==='whatsapp'?'b':'s'} ${icon}" style="color:${color};font-size:13px"></i>
+        return `
+          <div style="display:flex;gap:12px;padding:12px 0;
+            border-bottom:1px solid var(--border-light);align-items:flex-start">
+
+            <!-- Channel bubble -->
+            <div style="width:38px;height:38px;border-radius:50%;background:${bg};
+              display:flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:2px">
+              <i class="fa${l.channel==='whatsapp'?'b':'s'} ${icon}"
+                style="color:${color};font-size:14px"></i>
             </div>
 
-            <!-- Main info -->
+            <!-- Content -->
             <div style="flex:1;min-width:0">
-              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-                <span style="font-size:var(--font-size-sm);font-weight:600;
-                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px"
+              <!-- Row 1: subject + status badge -->
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px">
+                <span style="font-weight:600;font-size:var(--font-size-sm);
+                  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px"
                   title="${Utils.esc(l.subject || '')}">
                   ${Utils.esc(l.subject || 'Notification')}
                 </span>
-                <span class="badge ${l.status === 'sent' ? 'badge-green' : 'badge-red'}" style="font-size:10px">
-                  ${l.status}
+                <span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;
+                  border-radius:99px;font-size:10px;font-weight:600;
+                  background:${l.status==='sent' ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.15)'};
+                  color:${l.status==='sent' ? '#22c55e' : '#ef4444'}">
+                  <i class="fas fa-${l.status==='sent' ? 'check' : 'times'}"></i>
+                  ${l.status === 'sent' ? 'Sent' : 'Failed'}
+                </span>
+                <span style="font-size:10px;padding:2px 8px;border-radius:99px;
+                  background:${bg};color:${color};font-weight:600;text-transform:uppercase">
+                  ${l.channel || ''}
                 </span>
               </div>
-              <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">
-                ${l.recipient_name
-                  ? `<span><i class="fas fa-user" style="margin-right:3px"></i>${Utils.esc(l.recipient_name)}</span>`
-                  : ''}
-                ${l.recipient_contact
-                  ? `<span><i class="fas fa-at" style="margin-right:3px"></i>${Utils.esc(l.recipient_contact)}</span>`
-                  : ''}
-                <span><i class="fas fa-clock" style="margin-right:3px"></i>${when}</span>
-                <span style="color:var(--text-muted)">(${ago})</span>
+
+              <!-- Row 2: recipient + time -->
+              <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:var(--font-size-xs);
+                color:var(--text-muted);margin-bottom:6px">
+                ${l.recipient_name ? `
+                  <span><i class="fas fa-user" style="margin-right:4px;opacity:.6"></i>
+                    ${Utils.esc(l.recipient_name)}</span>` : ''}
+                ${l.recipient_contact ? `
+                  <span><i class="fas fa-${isEmail ? 'envelope' : 'mobile-alt'}"
+                    style="margin-right:4px;opacity:.6"></i>
+                    ${Utils.esc(l.recipient_contact)}</span>` : ''}
+                <span><i class="fas fa-clock" style="margin-right:4px;opacity:.6"></i>
+                  ${dateStr} &middot; ${timeStr}</span>
               </div>
-            </div>
 
-            <!-- Expand arrow -->
-            <i class="fas fa-chevron-down" id="log-chevron-${idx}"
-              style="color:var(--text-muted);font-size:11px;transition:transform .2s;flex-shrink:0"></i>
-          </div>
+              <!-- Row 3: message preview (collapsible) -->
+              ${cleanBody ? `
+                <div style="background:var(--bg-tertiary);border-radius:var(--radius-sm);
+                  padding:8px 10px;font-size:11px;color:var(--text-secondary);line-height:1.6;
+                  border-left:3px solid ${color};cursor:pointer"
+                  onclick="this.style.webkitLineClamp=this.style.webkitLineClamp?'':'3'"
+                  title="Click to expand">
+                  <div style="overflow:hidden;display:-webkit-box;
+                    -webkit-line-clamp:2;-webkit-box-orient:vertical">
+                    ${Utils.esc(cleanBody)}
+                  </div>
+                </div>` : ''}
+            </div>
+          </div>`;
+      }).join('');
 
-          <!-- Expandable detail -->
-          <div id="log-detail-${idx}" style="display:none;margin-top:10px;padding:10px 12px;
-            background:var(--bg-tertiary);border-radius:var(--radius-md);
-            font-size:var(--font-size-xs);color:var(--text-secondary)">
-            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">
-              <div><strong>Channel:</strong> ${Utils.esc((l.channel || '').toUpperCase())}</div>
-              <div><strong>Status:</strong> ${Utils.esc(l.status || '')}</div>
-              <div><strong>Sent:</strong> ${when}</div>
-              ${l.recipient_name ? `<div><strong>To:</strong> ${Utils.esc(l.recipient_name)}</div>` : ''}
-              ${l.recipient_contact ? `<div><strong>Contact:</strong> ${Utils.esc(l.recipient_contact)}</div>` : ''}
-            </div>
-            <div style="border-top:1px solid var(--border-color);padding-top:8px">
-              <strong style="display:block;margin-bottom:4px">Message:</strong>
-              <div style="white-space:pre-wrap;line-height:1.6">${Utils.esc(l.body || '(no body)')}</div>
+      return `
+        <div style="margin-bottom:1.5rem">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <div style="font-size:11px;font-weight:700;text-transform:uppercase;
+              letter-spacing:.08em;color:var(--text-muted)">${label}</div>
+            <div style="flex:1;height:1px;background:var(--border-color)"></div>
+            <div style="font-size:11px;color:var(--text-muted);font-weight:600">
+              ${items.length} notification${items.length !== 1 ? 's' : ''}
             </div>
           </div>
+          ${rows}
         </div>`;
-    }).join('');
+    };
+
+    return Object.entries(groups).map(([k,v]) => buildGroup(k,v)).join('')
+      || `<div style="text-align:center;padding:3rem;color:var(--text-muted)">
+            <i class="fas fa-search" style="font-size:2rem;opacity:.3;display:block;margin-bottom:.75rem"></i>
+            No results found.
+          </div>`;
   },
 
-  toggleLogDetail(idx) {
-    const detail   = document.getElementById(`log-detail-${idx}`);
-    const chevron  = document.getElementById(`log-chevron-${idx}`);
-    if (!detail) return;
-    const open = detail.style.display === 'none';
-    detail.style.display  = open ? '' : 'none';
-    if (chevron) chevron.style.transform = open ? 'rotate(180deg)' : '';
+  _renderHistoryModal(logs) {
+    const total   = logs.length;
+    const sent    = logs.filter(l => l.status === 'sent').length;
+    const failed  = logs.filter(l => l.status === 'failed').length;
+    const byEmail = logs.filter(l => l.channel === 'email').length;
+    const bySMS   = logs.filter(l => l.channel === 'sms').length;
+
+    // Collect unique dates for the date picker quick-list
+    const uniqueDates = [...new Set(
+      logs.map(l => {
+        const d = new Date(l.sent_at || l.created_at);
+        return isNaN(d) ? null : d.toISOString().slice(0,10);
+      }).filter(Boolean)
+    )].sort((a,b) => b.localeCompare(a)).slice(0, 60);
+
+    const bodyHTML = `
+      <div style="display:flex;flex-direction:column;gap:0">
+
+        <!-- ── STATS BAR ─────────────────────────────────────── -->
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:1rem">
+          ${[
+            { label:'Total',   val: total,   icon:'fa-history',     color:'var(--brand-primary)',  bg:'rgba(99,102,241,.08)' },
+            { label:'Sent',    val: sent,    icon:'fa-check-circle', color:'#22c55e',               bg:'rgba(34,197,94,.08)'  },
+            { label:'Failed',  val: failed,  icon:'fa-times-circle', color:'#ef4444',               bg:'rgba(239,68,68,.08)'  },
+            { label:'Email',   val: byEmail, icon:'fa-envelope',     color:'#6366f1',               bg:'rgba(99,102,241,.08)' },
+            { label:'SMS',     val: bySMS,   icon:'fa-comment-sms',  color:'#22c55e',               bg:'rgba(34,197,94,.08)'  },
+          ].map(s => `
+            <div onclick="NotificationsPage._quickFilter('${s.label}')"
+              style="background:${s.bg};border:1px solid ${s.color}22;border-radius:10px;
+                padding:10px 8px;text-align:center;cursor:pointer;transition:.15s"
+              onmouseover="this.style.transform='translateY(-2px)'"
+              onmouseout="this.style.transform=''"
+              title="Click to filter by ${s.label}">
+              <i class="fas ${s.icon}" style="color:${s.color};font-size:1.1rem"></i>
+              <div style="font-size:1.35rem;font-weight:700;color:${s.color};margin:2px 0">${s.val}</div>
+              <div style="font-size:10px;color:var(--text-muted);font-weight:600">${s.label}</div>
+            </div>`).join('')}
+        </div>
+
+        <!-- ── FILTER PANEL ──────────────────────────────────── -->
+        <div style="background:var(--bg-tertiary);border-radius:var(--radius-md);padding:12px 14px;
+          margin-bottom:1rem;border:1px solid var(--border-color)">
+
+          <!-- Row 1: keyword + date -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+            <!-- Keyword -->
+            <div style="position:relative">
+              <i class="fas fa-search" style="position:absolute;left:10px;top:50%;
+                transform:translateY(-50%);color:var(--text-muted);font-size:12px;pointer-events:none"></i>
+              <input type="text" id="hist-keyword" class="form-input"
+                style="padding-left:32px;font-size:13px" placeholder="Keyword: name, subject, message…"
+                oninput="NotificationsPage._applyFilters()" />
+            </div>
+            <!-- Specific date -->
+            <div style="position:relative">
+              <i class="fas fa-calendar-alt" style="position:absolute;left:10px;top:50%;
+                transform:translateY(-50%);color:var(--text-muted);font-size:12px;pointer-events:none"></i>
+              <input type="date" id="hist-date" class="form-input"
+                style="padding-left:32px;font-size:13px"
+                oninput="NotificationsPage._applyFilters()" />
+            </div>
+          </div>
+
+          <!-- Row 2: period + channel + status + reset -->
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+
+            <!-- Period quick-select -->
+            <select id="hist-period" class="form-select" style="font-size:12px;flex:1;min-width:110px"
+              onchange="NotificationsPage._applyFilters()">
+              <option value="">📅 All Time</option>
+              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="week">This Week</option>
+              <option value="month">This Month</option>
+              <option value="last30">Last 30 Days</option>
+              <option value="last90">Last 90 Days</option>
+            </select>
+
+            <!-- Channel -->
+            <select id="hist-channel" class="form-select" style="font-size:12px;flex:1;min-width:110px"
+              onchange="NotificationsPage._applyFilters()">
+              <option value="">📡 All Channels</option>
+              <option value="email">✉️ Email</option>
+              <option value="sms">💬 SMS</option>
+              <option value="push">🔔 Push</option>
+              <option value="whatsapp">🟢 WhatsApp</option>
+            </select>
+
+            <!-- Status -->
+            <select id="hist-status" class="form-select" style="font-size:12px;flex:1;min-width:110px"
+              onchange="NotificationsPage._applyFilters()">
+              <option value="">⚡ All Status</option>
+              <option value="sent">✅ Sent</option>
+              <option value="failed">❌ Failed</option>
+            </select>
+
+            <!-- Reset button -->
+            <button class="btn btn-ghost btn-sm" onclick="NotificationsPage._resetFilters()"
+              style="white-space:nowrap;font-size:12px">
+              <i class="fas fa-undo"></i> Reset
+            </button>
+          </div>
+        </div>
+
+        <!-- ── ACTIVE FILTERS CHIPS ───────────────────────────── -->
+        <div id="hist-chips" style="display:none;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+
+        <!-- ── RESULTS COUNT ─────────────────────────────────── -->
+        <div id="hist-count" style="font-size:12px;color:var(--text-muted);
+          margin-bottom:8px;padding-left:2px"></div>
+
+        <!-- ── GROUPED LOGS ───────────────────────────────────── -->
+        <div id="hist-groups" style="max-height:48vh;overflow-y:auto;padding-right:4px">
+          ${ total === 0
+            ? `<div style="text-align:center;padding:3rem;color:var(--text-muted)">
+                <i class="fas fa-inbox" style="font-size:2.5rem;opacity:.3;display:block;margin-bottom:.75rem"></i>
+                No notifications sent yet.
+               </div>`
+            : this._buildGroupsHTML(logs)
+          }
+        </div>
+
+        <!-- ── FOOTER ────────────────────────────────────────── -->
+        <div style="display:flex;justify-content:space-between;align-items:center;
+          margin-top:1rem;padding-top:.75rem;border-top:1px solid var(--border-color)">
+          <span id="hist-footer-count" style="font-size:12px;color:var(--text-muted)">
+            Showing ${total} notification${total !== 1 ? 's' : ''}
+          </span>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="NotificationsPage.openHistoryModal()">
+              <i class="fas fa-sync"></i> Refresh
+            </button>
+            <button class="btn btn-secondary" onclick="Modal.close()">
+              <i class="fas fa-times"></i> Close
+            </button>
+          </div>
+        </div>
+      </div>`;
+
+    Modal.open('📋 Notification History', bodyHTML, { size: 'xl' });
   },
+
+  /* ── Quick filter when clicking a stat card ───────────────── */
+  _quickFilter(label) {
+    const statusEl  = document.getElementById('hist-status');
+    const channelEl = document.getElementById('hist-channel');
+    if (!statusEl) return;
+    // Reset all first
+    this._resetFilters(false);
+    if (label === 'Sent')   { statusEl.value  = 'sent';  }
+    if (label === 'Failed') { statusEl.value  = 'failed';}
+    if (label === 'Email')  { channelEl.value = 'email'; }
+    if (label === 'SMS')    { channelEl.value = 'sms';   }
+    this._applyFilters();
+  },
+
+  /* ── Apply all active filters ─────────────────────────────── */
+  _applyFilters() {
+    const keyword  = (document.getElementById('hist-keyword')?.value  || '').toLowerCase().trim();
+    const period   =  document.getElementById('hist-period')?.value   || '';
+    const channel  =  document.getElementById('hist-channel')?.value  || '';
+    const status   =  document.getElementById('hist-status')?.value   || '';
+    const dateVal  =  document.getElementById('hist-date')?.value     || '';
+
+    const now      = new Date();
+    const todayStr = now.toISOString().slice(0,10);
+    const yestStr  = new Date(now - 86400000).toISOString().slice(0,10);
+    const weekAgo  = new Date(now - 7  * 86400000);
+    const monthAgo = new Date(now - 30 * 86400000);
+    const q90Ago   = new Date(now - 90 * 86400000);
+
+    let filtered = this._allLogs.filter(l => {
+      const d        = new Date(l.sent_at || l.created_at);
+      const dStr     = isNaN(d) ? '' : d.toISOString().slice(0,10);
+      const textHit  = !keyword ||
+        (l.recipient_name    || '').toLowerCase().includes(keyword) ||
+        (l.recipient_contact || '').toLowerCase().includes(keyword) ||
+        (l.subject           || '').toLowerCase().includes(keyword) ||
+        (l.body              || '').toLowerCase().includes(keyword) ||
+        (l.channel           || '').toLowerCase().includes(keyword);
+
+      const dateHit = !dateVal || dStr === dateVal;
+
+      let periodHit = true;
+      if (period === 'today')     periodHit = dStr === todayStr;
+      if (period === 'yesterday') periodHit = dStr === yestStr;
+      if (period === 'week')      periodHit = d >= weekAgo;
+      if (period === 'month')     periodHit = d >= monthAgo;
+      if (period === 'last30')    periodHit = d >= monthAgo;
+      if (period === 'last90')    periodHit = d >= q90Ago;
+
+      const chanHit   = !channel || (l.channel || '') === channel;
+      const statusHit = !status  || (l.status  || '') === status;
+
+      return textHit && dateHit && periodHit && chanHit && statusHit;
+    });
+
+    // Update groups
+    const groupsEl = document.getElementById('hist-groups');
+    if (groupsEl) groupsEl.innerHTML = this._buildGroupsHTML(filtered);
+
+    // Update footer count
+    const footerEl = document.getElementById('hist-footer-count');
+    if (footerEl) footerEl.textContent = `Showing ${filtered.length} of ${this._allLogs.length} notification${this._allLogs.length !== 1 ? 's' : ''}`;
+
+    // Build active-filter chips
+    const chips = [];
+    if (keyword)  chips.push({ label: `🔍 "${keyword}"`,            key:'keyword',  clear: () => { document.getElementById('hist-keyword').value = ''; } });
+    if (dateVal)  chips.push({ label: `📅 ${dateVal}`,              key:'date',     clear: () => { document.getElementById('hist-date').value   = ''; } });
+    if (period)   chips.push({ label: `⏱ ${document.getElementById('hist-period').options[document.getElementById('hist-period').selectedIndex].text}`, key:'period', clear: () => { document.getElementById('hist-period').value  = ''; } });
+    if (channel)  chips.push({ label: `📡 ${channel.toUpperCase()}`,key:'channel',  clear: () => { document.getElementById('hist-channel').value = ''; } });
+    if (status)   chips.push({ label: `⚡ ${status.charAt(0).toUpperCase()+status.slice(1)}`, key:'status', clear: () => { document.getElementById('hist-status').value  = ''; } });
+
+    const chipsEl = document.getElementById('hist-chips');
+    if (chipsEl) {
+      if (chips.length) {
+        chipsEl.style.display = 'flex';
+        chipsEl.innerHTML = chips.map(c => `
+          <span style="display:inline-flex;align-items:center;gap:5px;
+            background:var(--brand-primary);color:#fff;
+            padding:3px 10px 3px 8px;border-radius:99px;font-size:11px;font-weight:600">
+            ${c.label}
+            <i class="fas fa-times" style="cursor:pointer;font-size:9px;opacity:.8"
+              onclick="NotificationsPage._clearChip('${c.key}')"></i>
+          </span>`).join('');
+      } else {
+        chipsEl.style.display = 'none';
+        chipsEl.innerHTML = '';
+      }
+    }
+  },
+
+  /* ── Clear one chip ───────────────────────────────────────── */
+  _clearChip(key) {
+    const map = { keyword:'hist-keyword', date:'hist-date', period:'hist-period',
+                  channel:'hist-channel', status:'hist-status' };
+    const el = document.getElementById(map[key]);
+    if (el) el.value = '';
+    this._applyFilters();
+  },
+
+  /* ── Reset all filters ────────────────────────────────────── */
+  _resetFilters(andRender = true) {
+    ['hist-keyword','hist-date','hist-period','hist-channel','hist-status']
+      .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+    if (andRender) this._applyFilters();
+  },
+
+  /* ── Legacy alias kept for backward compatibility ─────────── */
+  _filterHistory(q) {
+    const kw = document.getElementById('hist-keyword');
+    if (kw) { kw.value = q; this._applyFilters(); }
+  },
+
+  toggleLogDetail(idx) { /* legacy — no longer used */ },
 };
