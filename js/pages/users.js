@@ -282,6 +282,18 @@ const UsersPage = {
       }
       if (result.error) throw result.error;
       Toast.success(id ? 'User updated!' : 'User created!');
+
+      // ── Fire on_student_created notification rule for new students ──
+      if (!id && data.user_type === 'student') {
+        const created = result.data?.[0] || result.data || {};
+        NotificationsPage.triggerRule('on_student_created', {
+          student_id: created.id   || null,
+          full_name:  data.full_name || '',
+          email:      data.email     || '',
+          phone:      data.phone     || '',
+        }).catch(err => console.warn('on_student_created trigger failed:', err));
+      }
+
       Modal.close();
       await this.loadUsers();
     } catch (err) {
