@@ -560,6 +560,21 @@ const App = {
     // Navigate to default page
     const hash = location.hash.replace('#', '') || 'dashboard';
     this.navigate(this.pages[hash] ? hash : 'dashboard');
+
+    // ── Run expiry check on every app load (silently) ──
+    // Throttled to once per calendar day (local date, not UTC)
+    const _d = new Date();
+    const _pad = n => String(n).padStart(2,'0');
+    const localDateStr = `${_d.getFullYear()}-${_pad(_d.getMonth()+1)}-${_pad(_d.getDate())}`;
+    const todayKey = 'mc_expiry_check_' + localDateStr;
+    if (!sessionStorage.getItem(todayKey)) {
+      sessionStorage.setItem(todayKey, '1');
+      // Wait 3s to ensure NotificationsPage.rules are loaded first
+      setTimeout(() => {
+        NotificationsPage.runExpiryCheck(true)
+          .catch(e => console.warn('Expiry check error:', e));
+      }, 3000);
+    }
   },
 
   // ─────────────────────────────────────────────
