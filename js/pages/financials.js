@@ -704,15 +704,19 @@ const FinancialsPage = {
         // Look up student name and package name for the transaction description
         const student = this._allocStudents.find(s => s.id === data.student_id);
         const pkg     = this.packages.find(p => p.id === data.package_id);
+        // Get the new allocation's ID from the result
+        const newAllocId = result.data?.[0]?.id || result.data?.id || null;
         const txData  = {
           type:        'income',
           amount:      data.price_paid,
           date:        data.start_date || Utils.todayISO(),
           category:    'Subscription',
           user_entity: student?.full_name || null,
-          description: pkg
+          // Embed allocation ID as hidden tag so we can delete it later
+          description: (pkg
             ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
-            : 'Package subscription',
+            : 'Package subscription')
+            + (newAllocId ? ` [alloc:${newAllocId}]` : ''),
           method:      'cash',
           status:      'completed',
         };
@@ -724,6 +728,21 @@ const FinancialsPage = {
         } else {
           Toast.success('Package allocated & income recorded!');
         }
+
+        // ── Fire on_payment notification rule ──────────────────────────────
+        if (student) {
+          NotificationsPage.triggerRule('on_payment', {
+            student_id: student.id,
+            full_name:  student.full_name  || '',
+            email:      student.email      || '',
+            phone:      student.phone      || '',
+            package:    pkg?.name          || '',
+            amount:     data.price_paid,
+            start_date: data.start_date    || Utils.todayISO(),
+            end_date:   data.end_date      || '',
+          }).catch(err => console.warn('on_payment trigger failed:', err));
+        }
+
       } else {
         Toast.success(id ? 'Allocation updated!' : 'Package allocated!');
       }
@@ -734,10 +753,24 @@ const FinancialsPage = {
   },
 
   async deleteAllocation(id) {
-    if (!confirm('Remove this allocation?')) return;
+    if (!confirm('Remove this allocation and its linked transaction?')) return;
+
+    // Find and delete the linked auto-transaction (tagged with [alloc:ID])
+    try {
+      const { data: txList } = await DB.getTransactions();
+      const linked = (txList || []).find(t =>
+        t.description && t.description.includes(`[alloc:${id}]`)
+      );
+      if (linked) {
+        await DB.deleteTransaction(linked.id);
+      }
+    } catch (e) {
+      console.warn('Could not delete linked transaction:', e);
+    }
+
     const { error } = await DB.deleteAllocation(id);
     if (error) return Toast.error(error.message);
-    Toast.success('Allocation removed');
+    Toast.success('Allocation and linked transaction removed.');
     await this._refresh();
   },
 
@@ -756,14 +789,23 @@ const FinancialsPage = {
       amount:      Number(t.amount) || 0,
       user_entity: t.user_entity || '',
       category:    t.category    || 'General',
-      description: t.description || '',
+      description: (t.description || '').replace(/\s*\[alloc:[^\]]+\]/g, '').trim(),
       method:      t.method      || 'cash',
       status:      t.status      || 'completed',
     }));
 
-    // Allocations treated as subscription income entries
+    // Build a set of allocation IDs that already have a linked auto-transaction
+    // (tagged with [alloc:UUID] in the description)
+    const allocsWithTx = new Set(
+      this.transactions
+        .map(t => { const m = (t.description || '').match(/\[alloc:([^\]]+)\]/); return m ? m[1] : null; })
+        .filter(Boolean)
+    );
+
+    // Only show allocations that do NOT have a linked transaction
+    // (i.e. older allocations created before the auto-transaction feature)
     const allocRows = this.allocations
-      .filter(a => a.price_paid > 0)
+      .filter(a => a.price_paid > 0 && !allocsWithTx.has(a.id))
       .map(a => ({
         _id:         a.id,
         _source:     'alloc',
@@ -777,7 +819,7 @@ const FinancialsPage = {
           : 'Package subscription',
         method:      'subscription',
         status:      a.status || 'active',
-        _allocStatus: a.status,   // keep original for badge colour
+        _allocStatus: a.status,
       }));
 
     // Merge and sort newest-first
