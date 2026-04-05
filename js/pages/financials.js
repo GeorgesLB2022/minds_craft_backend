@@ -167,14 +167,14 @@ const FinancialsPage = {
           </div>
           <div class="chart-container" style="height:260px"><canvas id="fin-chart"></canvas></div>
         </div>
-        <div class="card">
+        <div class="card" style="display:flex;flex-direction:column">
           <div class="card-header">
             <div class="card-title">
               Due Packages
               <span class="badge badge-red" style="margin-left:6px">Action Required</span>
             </div>
           </div>
-          <div id="due-packages-list">${this.renderDuePackages()}</div>
+          <div id="due-packages-list" style="overflow-y:auto;max-height:320px;padding-right:4px">${this.renderDuePackages()}</div>
         </div>
       </div>
       <div class="card" style="margin-top:1rem">
@@ -197,17 +197,33 @@ const FinancialsPage = {
     const soonStr = soon.toISOString().slice(0, 10);
     const due = this.allocations.filter(a => a.status === 'active' && a.end_date <= soonStr);
     if (!due.length) return '<div class="empty-state"><i class="fas fa-check-circle"></i><p>No packages due soon</p></div>';
-    return due.slice(0, 5).map(a => {
+    return due.map(a => {
       const daysLeft = Math.ceil((new Date(a.end_date) - new Date()) / 86400000);
+      const urgency  = daysLeft <= 0 ? 'badge-red' : daysLeft <= 3 ? 'badge-red' : daysLeft <= 7 ? 'badge-yellow' : 'badge-blue';
+      const label    = daysLeft <= 0 ? 'Expired' : `${daysLeft}d left`;
       return `
-        <div class="due-item">
-          <div>
-            <div style="font-weight:600;font-size:var(--font-size-sm)">${Utils.esc(a.student?.full_name || 'Unknown')}</div>
-            <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(a.package?.name || 'Package')}</div>
+        <div class="due-item" onclick="FinancialsPage.openEditAllocation('${a.id}')"
+          style="cursor:pointer;transition:.15s;border-radius:var(--radius-md);padding:10px 12px;
+            margin-bottom:4px;border:1px solid transparent"
+          onmouseover="this.style.background='var(--bg-tertiary)';this.style.borderColor='var(--brand-primary)44'"
+          onmouseout="this.style.background='';this.style.borderColor='transparent'">
+          <div style="display:flex;align-items:center;gap:8px;min-width:0">
+            <div style="width:34px;height:34px;border-radius:50%;background:rgba(99,102,241,.12);
+              display:flex;align-items:center;justify-content:center;flex-shrink:0">
+              <i class="fas fa-box" style="color:var(--brand-primary);font-size:13px"></i>
+            </div>
+            <div style="min-width:0">
+              <div style="font-weight:600;font-size:var(--font-size-sm);white-space:nowrap;
+                overflow:hidden;text-overflow:ellipsis">${Utils.esc(a.student?.full_name || 'Unknown')}</div>
+              <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(a.package?.name || 'Package')}</div>
+            </div>
           </div>
-          <div style="text-align:right">
-            <div class="badge ${daysLeft <= 3 ? 'badge-red' : daysLeft <= 7 ? 'badge-yellow' : 'badge-blue'}">${daysLeft}d left</div>
+          <div style="text-align:right;flex-shrink:0">
+            <div class="badge ${urgency}">${label}</div>
             <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">${Utils.formatDate(a.end_date)}</div>
+            <div style="font-size:10px;color:var(--brand-primary);margin-top:2px;font-weight:500">
+              <i class="fas fa-edit" style="font-size:9px"></i> Click to renew
+            </div>
           </div>
         </div>
       `;
@@ -699,40 +715,80 @@ const FinancialsPage = {
       const result = id ? await DB.updateAllocation(id, data) : await DB.createAllocation(data);
       if (result.error) throw result.error;
 
-      // ── Auto-create an income transaction for new allocations with a price ──
-      if (isNew && data.price_paid > 0) {
-        // Look up student name and package name for the transaction description
-        const student = this._allocStudents.find(s => s.id === data.student_id);
-        const pkg     = this.packages.find(p => p.id === data.package_id);
-        // Get the new allocation's ID from the result
-        const newAllocId = result.data?.[0]?.id || result.data?.id || null;
-        const txData  = {
-          type:        'income',
-          amount:      data.price_paid,
-          date:        data.start_date || Utils.todayISO(),
-          category:    'Subscription',
-          user_entity: student?.full_name || null,
-          // Embed allocation ID as hidden tag so we can delete it later
-          description: (pkg
-            ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
-            : 'Package subscription')
-            + (newAllocId ? ` [alloc:${newAllocId}]` : ''),
-          method:      'cash',
-          status:      'completed',
-        };
-        const txResult = await DB.createTransaction(txData);
-        if (txResult.error) {
-          // Non-fatal: allocation was saved, just warn about the transaction
-          console.warn('Auto-transaction failed:', txResult.error);
-          Toast.warning('Allocation saved but auto-transaction could not be recorded.');
+      // ── Resolve student + package for both new and renewal ──────────────
+      const allocId  = id || result.data?.[0]?.id || result.data?.id || null;
+      const studentId = data.student_id || (id ? this.allocations.find(a => a.id === id)?.student_id : null);
+      const student  = this._allocStudents.find(s => s.id === studentId)
+                    || this.allocations.find(a => a.id === id)?.student;
+      const pkg      = this.packages.find(p => p.id === data.package_id)
+                    || this.allocations.find(a => a.id === id)?.package;
+
+      // ── Auto-create income transaction ───────────────────────────────────
+      // Fires for NEW allocations with price, AND for RENEWALS (edit) with price
+      const isRenewal = !isNew && data.price_paid > 0;
+      if ((isNew || isRenewal) && data.price_paid > 0) {
+
+        // For renewals: update the existing linked transaction if found
+        if (isRenewal) {
+          const { data: txList } = await DB.getTransactions();
+          const linked = (txList || []).find(t =>
+            t.description && t.description.includes(`[alloc:${id}]`)
+          );
+          if (linked) {
+            // Update the existing transaction amount + date
+            await DB.updateTransaction(linked.id, {
+              amount: data.price_paid,
+              date:   data.start_date || Utils.todayISO(),
+              description: (pkg
+                ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
+                : 'Package renewal')
+                + ` [alloc:${id}]`,
+            }).catch(e => console.warn('Could not update linked transaction:', e));
+          } else {
+            // No linked transaction found — create a new one for this renewal
+            await DB.createTransaction({
+              type:        'income',
+              amount:      data.price_paid,
+              date:        data.start_date || Utils.todayISO(),
+              category:    'Subscription',
+              user_entity: student?.full_name || null,
+              description: (pkg
+                ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
+                : 'Package renewal')
+                + (allocId ? ` [alloc:${allocId}]` : ''),
+              method:      'cash',
+              status:      'completed',
+            }).catch(e => console.warn('Auto-transaction failed on renewal:', e));
+          }
+          Toast.success('Allocation renewed & transaction updated!');
         } else {
-          Toast.success('Package allocated & income recorded!');
+          // New allocation — create transaction
+          const txData = {
+            type:        'income',
+            amount:      data.price_paid,
+            date:        data.start_date || Utils.todayISO(),
+            category:    'Subscription',
+            user_entity: student?.full_name || null,
+            description: (pkg
+              ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
+              : 'Package subscription')
+              + (allocId ? ` [alloc:${allocId}]` : ''),
+            method:      'cash',
+            status:      'completed',
+          };
+          const txResult = await DB.createTransaction(txData);
+          if (txResult.error) {
+            console.warn('Auto-transaction failed:', txResult.error);
+            Toast.warning('Allocation saved but auto-transaction could not be recorded.');
+          } else {
+            Toast.success('Package allocated & income recorded!');
+          }
         }
 
-        // ── Fire on_payment notification rule ──────────────────────────────
+        // ── Fire on_payment notification rule (new + renewal) ───────────────
         if (student) {
           NotificationsPage.triggerRule('on_payment', {
-            student_id: student.id,
+            student_id: student.id   || studentId,
             full_name:  student.full_name  || '',
             email:      student.email      || '',
             phone:      student.phone      || '',
