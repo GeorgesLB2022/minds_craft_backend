@@ -37,16 +37,53 @@ const TrainersPage = {
   },
 
   async loadTrainers() {
-    const { data, error } = await DB.getTrainers();
+    const [{ data, error }, { data: assignments }, { data: legacyLevels }] = await Promise.all([
+      DB.getTrainers(),
+      // New: trainer_assignments table (multi-trainer)
+      DB.getAll('trainer_assignments', {
+        select: '*, level:level_id(id, name, day_of_week, course:course_id(id, name))'
+      }),
+      // Legacy: levels with a trainer_id FK set directly
+      DB.getAll('levels', {
+        select: 'id, name, day_of_week, trainer_id, course:course_id(id, name)'
+      }),
+    ]);
     if (error) return Toast.error('Failed to load trainers');
     this.trainers = data || [];
+
+    // Build map from new trainer_assignments table
+    const map = {};
+    const assignedKeys = new Set(); // track level_id+trainer_id combos to avoid duplicates
+    (assignments || []).forEach(a => {
+      const key = `${a.trainer_id}__${a.level_id}`;
+      assignedKeys.add(key);
+      if (!map[a.trainer_id]) map[a.trainer_id] = [];
+      if (a.level) map[a.trainer_id].push(a.level);
+    });
+
+    // Also include levels assigned via the legacy trainer_id FK
+    // (for backward compatibility — avoids showing nothing on cards until re-saved)
+    (legacyLevels || []).forEach(lv => {
+      if (!lv.trainer_id) return;
+      const key = `${lv.trainer_id}__${lv.id}`;
+      if (assignedKeys.has(key)) return; // already covered by trainer_assignments
+      if (!map[lv.trainer_id]) map[lv.trainer_id] = [];
+      map[lv.trainer_id].push({ id: lv.id, name: lv.name, day_of_week: lv.day_of_week, course: lv.course });
+    });
+
+    this.trainers.forEach(t => { t._levels = map[t.id] || []; });
     this.renderGrid(this.trainers);
   },
 
   filter(q) {
+    const term = q.toLowerCase();
     const filtered = this.trainers.filter(t =>
-      (t.full_name || '').toLowerCase().includes(q.toLowerCase()) ||
-      (t.email || '').toLowerCase().includes(q.toLowerCase())
+      (t.full_name || '').toLowerCase().includes(term) ||
+      (t.email    || '').toLowerCase().includes(term) ||
+      (t._levels  || []).some(lv =>
+        (lv.name || '').toLowerCase().includes(term) ||
+        (lv.course?.name || '').toLowerCase().includes(term)
+      )
     );
     this.renderGrid(filtered);
   },
@@ -63,6 +100,34 @@ const TrainersPage = {
 
   trainerCardHTML(t) {
     const color = Utils.avatarColor(t.full_name);
+    const levels = t._levels || [];
+    // Group levels by course name
+    const courseMap = {};
+    levels.forEach(lv => {
+      const cname = lv.course?.name || 'General';
+      if (!courseMap[cname]) courseMap[cname] = [];
+      courseMap[cname].push(lv);
+    });
+    const levelsBadges = levels.length
+      ? Object.entries(courseMap).map(([cname, lvs]) =>
+          `<div style="margin-bottom:6px">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+              color:var(--text-muted);margin-bottom:4px">${Utils.esc(cname)}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px">
+              ${lvs.map(lv => `
+                <span style="display:inline-flex;align-items:center;gap:4px;
+                  background:rgba(99,102,241,.12);color:var(--brand-primary);
+                  border:1px solid rgba(99,102,241,.25);border-radius:6px;
+                  padding:2px 8px;font-size:11px;font-weight:500">
+                  <i class="fas fa-layer-group" style="font-size:9px"></i>
+                  ${Utils.esc(lv.name)}
+                  ${lv.day_of_week ? `<span style="opacity:.65;font-size:10px">${lv.day_of_week.slice(0,3)}</span>` : ''}
+                </span>`).join('')}
+            </div>
+          </div>`
+        ).join('')
+      : `<div style="font-size:var(--font-size-xs);color:var(--text-muted);font-style:italic">No levels assigned yet.</div>`;
+
     return `
       <div class="trainer-card">
         <div class="trainer-card-header">
@@ -70,18 +135,38 @@ const TrainersPage = {
             <div class="trainer-avatar" style="background:${color}">${Utils.initials(t.full_name)}</div>
             <div>
               <div style="font-weight:700;font-size:var(--font-size-md)">${Utils.esc(t.full_name)}</div>
-              <div style="font-size:var(--font-size-xs);color:var(--text-muted)">Staff / Trainer</div>
+              <div style="font-size:var(--font-size-xs);color:var(--text-muted)">
+                Staff / Trainer
+                <span style="margin-left:6px;background:var(--bg-tertiary);border-radius:99px;
+                  padding:1px 7px;font-size:10px;font-weight:600;color:var(--text-secondary)">
+                  ${levels.length} level${levels.length !== 1 ? 's' : ''}
+                </span>
+              </div>
             </div>
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
             ${Utils.statusBadge(t.status)}
           </div>
         </div>
-        <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+
+        <!-- Contact info -->
+        <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">
           ${t.email ? `<div style="font-size:var(--font-size-sm);color:var(--text-secondary)"><i class="fas fa-envelope" style="width:16px;color:var(--text-muted)"></i> ${Utils.esc(t.email)}</div>` : ''}
           ${t.phone ? `<div style="font-size:var(--font-size-sm);color:var(--text-secondary)"><i class="fas fa-phone" style="width:16px;color:var(--text-muted)"></i> ${Utils.esc(t.phone)}</div>` : ''}
           ${t.fee_session ? `<div style="font-size:var(--font-size-sm);color:var(--brand-primary);font-weight:600"><i class="fas fa-dollar-sign" style="width:16px"></i> ${Utils.formatCurrency(t.fee_session)} / session</div>` : ''}
         </div>
+
+        <!-- Assigned levels -->
+        <div style="background:var(--bg-tertiary);border-radius:var(--radius-md);
+          padding:10px 12px;margin-bottom:10px;border:1px solid var(--border-color)">
+          <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+            color:var(--text-muted);margin-bottom:8px">
+            <i class="fas fa-chalkboard" style="margin-right:5px"></i>Assigned Levels
+          </div>
+          ${levelsBadges}
+        </div>
+
+        <!-- Actions -->
         <div style="display:flex;gap:8px">
           <button class="btn btn-primary btn-sm" style="flex:1" onclick="TrainersPage.manageAssignments('${t.id}')">
             <i class="fas fa-layer-group"></i> Manage Assignments
@@ -171,11 +256,17 @@ const TrainersPage = {
 
     const [{ data: courses }, { data: allLevels }, { data: existing }] = await Promise.all([
       DB.getCourses(),
-      DB.getAllLevels(),
+      // Include trainer_id (legacy) so we can merge both sources
+      DB.getAll('levels', { select: 'id, name, day_of_week, trainer_id, course_id, course:course_id(id, name)' }),
       DB.getTrainerAssignments(trainerId),
     ]);
 
-    const assignedIds = (existing || []).map(a => a.level_id);
+    // Merge: new trainer_assignments rows + legacy levels.trainer_id
+    const fromAssignments = new Set((existing || []).map(a => a.level_id));
+    const fromLegacy = new Set(
+      (allLevels || []).filter(lv => lv.trainer_id === trainerId).map(lv => lv.id)
+    );
+    const assignedIds = new Set([...fromAssignments, ...fromLegacy]);
 
     const courseGroups = (courses || []).map(c => {
       const levels = (allLevels || []).filter(lv => lv.course_id === c.id);
@@ -184,7 +275,7 @@ const TrainersPage = {
           <div style="font-size:var(--font-size-sm);font-weight:700;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">${Utils.esc(c.name)}</div>
           ${levels.length ? levels.map(lv => `
             <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer">
-              <input type="checkbox" name="level_ids" value="${lv.id}" ${assignedIds.includes(lv.id)?'checked':''}
+              <input type="checkbox" name="level_ids" value="${lv.id}" ${assignedIds.has(lv.id)?'checked':''}
                 style="width:16px;height:16px;accent-color:var(--brand-primary)" />
               <span style="font-size:var(--font-size-sm)">${Utils.esc(lv.name)}</span>
               ${lv.day_of_week ? `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">(${lv.day_of_week})</span>` : ''}
@@ -212,10 +303,33 @@ const TrainersPage = {
     const checkboxes = form.querySelectorAll('input[name="level_ids"]:checked');
     const levelIds = Array.from(checkboxes).map(c => c.value);
     try {
+      // 1. Update trainer_assignments table (new multi-trainer source)
       const { error } = await DB.setTrainerAssignments(trainerId, levelIds);
       if (error) throw error;
+
+      // 2. Also sync levels.trainer_id (legacy single FK) for full bidirectional consistency:
+      //    - For each newly assigned level → set trainer_id = trainerId (if not already set)
+      //    - For all levels previously set to this trainer but now unchecked → clear trainer_id
+      const { data: allLevels } = await DB.getAll('levels', {
+        select: 'id, trainer_id'
+      });
+      const levelIdSet = new Set(levelIds);
+      const updates = (allLevels || []).map(lv => {
+        if (levelIdSet.has(lv.id) && lv.trainer_id !== trainerId) {
+          // assign this trainer as the primary (legacy) trainer
+          return DB.updateLevel(lv.id, { trainer_id: trainerId });
+        }
+        if (!levelIdSet.has(lv.id) && lv.trainer_id === trainerId) {
+          // unassigned — clear the legacy FK
+          return DB.updateLevel(lv.id, { trainer_id: null });
+        }
+        return null;
+      }).filter(Boolean);
+      await Promise.all(updates);
+
       Toast.success('Assignments saved!');
       Modal.close();
+      await this.loadTrainers(); // refresh cards to show updated levels
     } catch (err) { Toast.error(err.message || 'Failed to save assignments'); }
   },
 };
