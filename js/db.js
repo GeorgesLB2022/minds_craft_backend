@@ -270,6 +270,23 @@ const DB = {
     return this.insertMany('trainer_assignments', rows);
   },
 
+  /** Get all trainer assignments for a specific level */
+  async getLevelTrainerAssignments(levelId) {
+    return this.getAll('trainer_assignments', {
+      select: '*, trainer:trainer_id(id, full_name)',
+      filter: { level_id: levelId }
+    });
+  },
+
+  /** Set (replace) all trainer assignments for a specific level */
+  async setLevelTrainerAssignments(levelId, trainerIds) {
+    if (!_supabase) return { error: new Error('Not initialized') };
+    await _supabase.from('trainer_assignments').delete().eq('level_id', levelId);
+    if (trainerIds.length === 0) return { data: [], error: null };
+    const rows = trainerIds.map(tid => ({ trainer_id: tid, level_id: levelId }));
+    return this.insertMany('trainer_assignments', rows);
+  },
+
   // ─────────────────────────────────────────────
   // EVENTS
   // ─────────────────────────────────────────────
@@ -304,6 +321,7 @@ const DB = {
   },
 
   async createTransaction(data) { return this.insert('transactions', data); },
+  async updateTransaction(id, data) { return this.update('transactions', id, data); },
   async deleteTransaction(id) { return this.remove('transactions', id); },
 
   async getStudentAllocations(opts = {}) {
