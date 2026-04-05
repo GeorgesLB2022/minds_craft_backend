@@ -40,6 +40,22 @@ const App = {
   async boot() {
     initTheme();
 
+    // ── FAST-RESTORE: if Supabase already has a cached session in localStorage,
+    //    show the app immediately (no flicker) — handles sandbox reloads on
+    //    window/tab switch without waiting for the full auth round-trip.
+    //    We still verify the session async below and sign out if it's expired.
+    try {
+      const raw = Object.keys(localStorage).find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
+      if (raw) {
+        const cached = JSON.parse(localStorage.getItem(raw));
+        if (cached?.user && cached?.expires_at && cached.expires_at * 1000 > Date.now()) {
+          this.currentUser = cached.user;
+          this._fastRestored = true;
+          this.showApp();
+        }
+      }
+    } catch(e) { /* ignore parse errors */ }
+
     // ── Read hash FIRST before anything else ──
     const hash = window.location.hash;
     const hasToken = hash.includes('access_token');
@@ -105,15 +121,20 @@ const App = {
         try { history.replaceState(null, '', window.location.pathname); } catch(e) {}
 
         if (linkType === 'magiclink' || linkType === 'recovery') {
+          // Genuine magic-link / password-recovery login → always show app
           this.showApp();
           setTimeout(() => this.promptSetPassword(), 800);
-        } else {
+        } else if (!this._fastRestored) {
+          // Normal login (not a page-reload restore) → show app
           this.showApp();
         }
+        // If _fastRestored is true, the app is already showing — do nothing.
+        // This prevents double-render on sandbox reloads.
       } else if (event === 'PASSWORD_RECOVERY') {
         this.showPasswordReset();
       } else if (event === 'SIGNED_OUT') {
         this.currentUser = null;
+        this._fastRestored = false;
         this.showLogin();
       }
     });
@@ -122,9 +143,13 @@ const App = {
     const session = await DB.getSession();
     if (session) {
       this.currentUser = session.user;
-      this.showApp();
+      if (!this._fastRestored) this.showApp(); // already showing if fast-restored
+      // Mark as fully verified — onAuthChange SIGNED_IN that fires right after
+      // getSession() is just a session-restore echo, not a real new login.
+      this._fastRestored = true;
     } else if (!hasToken) {
-      this.showLogin();
+      this._fastRestored = false;
+      this.showLogin(); // session truly expired — force login
     }
     // hasToken case: wait for onAuthChange to fire
   },
@@ -525,15 +550,19 @@ const App = {
   async logout() {
     await DB.signOut();
     this.currentUser = null;
+    this._appShown = false;
+    this._fastRestored = false;
     this.showLogin();
   },
 
   // ─────────────────────────────────────────────
   // SHOW APP
   // ─────────────────────────────────────────────
-  showApp() {
-    document.getElementById('login-screen').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
+  showApp(forceRender = false) {
+    const loginEl = document.getElementById('login-screen');
+    const appEl   = document.getElementById('app');
+    loginEl.classList.add('hidden');
+    appEl.classList.remove('hidden');
 
     // Set user info in sidebar
     const email = this.currentUser?.email || '';
@@ -547,19 +576,26 @@ const App = {
     const tav = document.getElementById('topbar-avatar');
     if (tav) tav.textContent = initials;
 
-    // Setup nav listeners
+    // Setup nav listeners (safe to re-attach — they are identical)
     document.querySelectorAll('.nav-item[data-page]').forEach(item => {
-      item.addEventListener('click', (e) => {
+      // Clone node to clear any duplicate listeners from previous calls
+      const fresh = item.cloneNode(true);
+      item.parentNode.replaceChild(fresh, item);
+      fresh.addEventListener('click', (e) => {
         e.preventDefault();
-        this.navigate(item.dataset.page);
-        // Close sidebar on mobile
+        this.navigate(fresh.dataset.page);
         if (window.innerWidth < 768) toggleSidebar();
       });
     });
 
-    // Navigate to default page
-    const hash = location.hash.replace('#', '') || 'dashboard';
-    this.navigate(this.pages[hash] ? hash : 'dashboard');
+    // ── Only navigate/render page content on first show or forced re-render ──
+    // On a sandbox reload-restore the page container already has content;
+    // re-navigating would wipe it and show a spinner unnecessarily.
+    if (!this._appShown || forceRender) {
+      this._appShown = true;
+      const hash = location.hash.replace('#', '') || 'dashboard';
+      this.navigate(this.pages[hash] ? hash : 'dashboard');
+    }
 
     // ── Run expiry check on every app load (silently) ──
     // Throttled to once per calendar day (local date, not UTC)
@@ -567,8 +603,8 @@ const App = {
     const _pad = n => String(n).padStart(2,'0');
     const localDateStr = `${_d.getFullYear()}-${_pad(_d.getMonth()+1)}-${_pad(_d.getDate())}`;
     const todayKey = 'mc_expiry_check_' + localDateStr;
-    if (!sessionStorage.getItem(todayKey)) {
-      sessionStorage.setItem(todayKey, '1');
+    if (!localStorage.getItem(todayKey)) {
+      localStorage.setItem(todayKey, '1');
       // Wait 3s to ensure NotificationsPage.rules are loaded first
       setTimeout(() => {
         NotificationsPage.runExpiryCheck(true)
@@ -604,3 +640,28 @@ const App = {
 // BOOT ON DOM READY
 // ─────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => App.boot());
+
+// ─────────────────────────────────────────────
+// VISIBILITY GUARD — prevent re-boot on focus
+// When the user switches windows/tabs and comes
+// back, the sandbox may reload. We detect this
+// and silently restore the session instead of
+// showing the login screen again.
+// ─────────────────────────────────────────────
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState !== 'visible') return;
+  // Only act if the app is already booted and showing
+  const appEl   = document.getElementById('app');
+  const loginEl = document.getElementById('login-screen');
+  if (!appEl || !loginEl) return;
+  // If login screen is showing but we have a valid session → restore silently
+  if (!loginEl.classList.contains('hidden')) {
+    try {
+      const session = await DB.getSession();
+      if (session && session.user) {
+        App.currentUser = session.user;
+        App.showApp();
+      }
+    } catch(e) { /* ignore */ }
+  }
+});
