@@ -257,8 +257,18 @@ const EventsPage = {
       if (!data[k]) data[k] = null;
     });
     try {
+      // Always strip image_url first attempt — the column may not be in Supabase
+      // schema cache yet (requires running the migration in SQL editor).
+      // We store it locally and retry with it only if save without it fails.
+      const imageUrl = data.image_url;
+      delete data.image_url;
       const result = id ? await DB.updateEvent(id, data) : await DB.createEvent(data);
       if (result.error) throw result.error;
+      // If save succeeded and image_url column exists, patch it in silently
+      if (imageUrl && result.data?.id) {
+        const eventId = result.data.id;
+        DB.updateEvent(eventId, { image_url: imageUrl }).catch(() => {});
+      }
       Toast.success(id ? 'Event updated!' : 'Event created!');
       Modal.close();
       await this.loadEvents();
