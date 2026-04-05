@@ -237,7 +237,7 @@ const CoursesPage = {
     const el = document.getElementById('courses-content');
     if (!el) return;
 
-    const [{ data: levels }, { data: trainers }, { data: allEnrollments }] = await Promise.all([
+    const [{ data: levels }, { data: trainers }, { data: allEnrollments }, { data: allAssignments }] = await Promise.all([
       DB.getLevels(course.id),
       DB.getTrainers(),
       // fetch all enrollments for ALL levels of this course in one shot
@@ -246,9 +246,21 @@ const CoursesPage = {
         // We can't filter by course_id directly on enrollments, so fetch all
         // levels ids client-side after we have them
       }),
+      // fetch all trainer_assignments (to show multi-trainers per level)
+      DB.getAll('trainer_assignments', {
+        select: '*, trainer:trainer_id(id, full_name)',
+      }),
     ]);
     this._trainers = trainers || [];
     this._levels   = levels   || [];
+
+    // Attach _trainerNames array to each level from trainer_assignments
+    const assignMap = {};
+    (allAssignments || []).forEach(a => {
+      if (!assignMap[a.level_id]) assignMap[a.level_id] = [];
+      if (a.trainer?.full_name) assignMap[a.level_id].push(a.trainer.full_name);
+    });
+    this._levels.forEach(lv => { lv._trainerNames = assignMap[lv.id] || []; });
 
     // Build enrollment count map: levelId → { total, active }
     const levelIds = new Set((this._levels).map(l => l.id));
@@ -336,7 +348,11 @@ const CoursesPage = {
           ${lv.start_time  ? `<span><i class="fas fa-clock"></i> ${Utils.esc(lv.start_time)} – ${Utils.esc(lv.end_time || '')}</span>` : ''}
           ${lv.duration_mins ? `<span><i class="fas fa-hourglass-half"></i> ${lv.duration_mins} min</span>` : ''}
           <span><i class="fas fa-users"></i> Ages ${lv.min_age}–${lv.max_age}</span>
-          <span><i class="fas fa-user-tie"></i> ${lv.trainer?.full_name || 'No trainer'}</span>
+          <span><i class="fas fa-user-tie"></i> ${
+            lv._trainerNames?.length
+              ? lv._trainerNames.join(', ')
+              : (lv.trainer?.full_name || 'No trainer')
+          }</span>
           ${lv.capacity ? `<span><i class="fas fa-chair"></i> Capacity: ${lv.capacity}</span>` : ''}
         </div>
         ${lv.description ? `<p style="font-size:var(--font-size-sm);color:var(--text-muted);margin-top:8px">${Utils.esc(lv.description)}</p>` : ''}
@@ -620,7 +636,7 @@ const CoursesPage = {
   // LEVEL FORM
   // ─────────────────────────────────────────────
   openAddLevel() {
-    Modal.open('Add New Level', this.levelFormHTML(null), { size: 'lg' });
+    Modal.open('Add New Level', this.levelFormHTML(null, []), { size: 'lg' });
   },
 
   openEditLevel(id) {
@@ -628,12 +644,30 @@ const CoursesPage = {
   },
 
   async _openLevelModal(id) {
-    const { data: lv } = await DB.getOne('levels', id);
+    const [{ data: lv }, { data: assignments }] = await Promise.all([
+      DB.getOne('levels', id),
+      DB.getLevelTrainerAssignments(id),
+    ]);
     if (!lv) return Toast.error('Level not found');
-    Modal.open('Edit Level', this.levelFormHTML(lv), { size: 'lg' });
+
+    // Merge: trainer_assignments rows + legacy levels.trainer_id (single FK)
+    // This ensures trainers assigned via the old single-select are shown as checked
+    const fromAssignments = (assignments || []).map(a => a.trainer_id);
+    const assignedTrainerIds = [...new Set([
+      ...fromAssignments,
+      ...(lv.trainer_id ? [lv.trainer_id] : []),  // include legacy single FK
+    ])];
+
+    // Auto-migrate: if legacy trainer_id exists but no row in trainer_assignments,
+    // write it now so the trainer card reflects it immediately
+    if (lv.trainer_id && !fromAssignments.includes(lv.trainer_id)) {
+      await DB.setLevelTrainerAssignments(id, assignedTrainerIds).catch(() => {});
+    }
+
+    Modal.open('Edit Level', this.levelFormHTML(lv, assignedTrainerIds), { size: 'lg' });
   },
 
-  levelFormHTML(lv) {
+  levelFormHTML(lv, assignedTrainerIds = []) {
     const days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
     const trainers = this._trainers || [];
     return `
@@ -690,11 +724,21 @@ const CoursesPage = {
           </div>
         </div>
         <div class="form-group">
-          <label class="form-label">Trainer</label>
-          <select name="trainer_id" class="form-select">
-            <option value="">— No Trainer —</option>
-            ${trainers.map(t => `<option value="${t.id}" ${lv?.trainer_id===t.id?'selected':''}>${Utils.esc(t.full_name)}</option>`).join('')}
-          </select>
+          <label class="form-label">Trainers <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(select one or more)</span></label>
+          ${trainers.length === 0
+            ? `<p style="font-size:var(--font-size-sm);color:var(--text-muted)">No trainers available. Add trainers first.</p>`
+            : `<div style="display:flex;flex-direction:column;gap:6px;max-height:160px;overflow-y:auto;
+                  background:var(--bg-tertiary);border:1px solid var(--border-color);
+                  border-radius:var(--radius-md);padding:10px 12px">
+                ${trainers.map(t => `
+                  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;padding:2px 0">
+                    <input type="checkbox" name="trainer_ids" value="${t.id}"
+                      ${assignedTrainerIds.includes(t.id) ? 'checked' : ''}
+                      style="width:15px;height:15px;accent-color:var(--brand-primary);flex-shrink:0" />
+                    <span style="font-size:var(--font-size-sm);font-weight:500">${Utils.esc(t.full_name)}</span>
+                  </label>`).join('')}
+              </div>`
+          }
         </div>
         <div class="form-row">
           <div class="form-group">
@@ -724,6 +768,9 @@ const CoursesPage = {
   async saveLevel(e, id) {
     e.preventDefault();
     const fd = new FormData(e.target);
+    // Collect multi-select trainer checkboxes
+    const trainerIds = Array.from(e.target.querySelectorAll('input[name="trainer_ids"]:checked'))
+      .map(cb => cb.value);
     const raw = Object.fromEntries(fd.entries());
     const data = {
       name: raw.name,
@@ -736,7 +783,8 @@ const CoursesPage = {
       end_time: raw.end_time || null,
       duration_mins: parseInt(raw.duration_mins) || 60,
       capacity: parseInt(raw.capacity) || 15,
-      trainer_id: raw.trainer_id || null,
+      // Keep trainer_id as first selected trainer for legacy compatibility
+      trainer_id: trainerIds[0] || null,
       acquisitions: raw.acquisitions_str ? raw.acquisitions_str.split(',').map(s => s.trim()).filter(Boolean) : [],
       prerequisites: raw.prerequisites_str ? raw.prerequisites_str.split(',').map(s => s.trim()).filter(Boolean) : [],
       status: raw.status,
@@ -745,6 +793,9 @@ const CoursesPage = {
     try {
       const result = id ? await DB.updateLevel(id, data) : await DB.createLevel(data);
       if (result.error) throw result.error;
+      const levelId = id || result.data?.id;
+      // Sync trainer_assignments for this level
+      if (levelId) await DB.setLevelTrainerAssignments(levelId, trainerIds);
       Toast.success(id ? 'Level updated!' : 'Level added!');
       Modal.close();
       // Preserve expanded state after refresh
