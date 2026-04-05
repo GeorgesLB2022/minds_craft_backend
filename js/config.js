@@ -19,8 +19,8 @@
 // ── OPTION A: Hardcode credentials here (most reliable) ──────
 //   Replace the empty strings with your real values.
 //   Leave empty to use the setup screen / localStorage instead.
-const SUPABASE_URL      = '';   // e.g. 'https://xxxx.supabase.co'
-const SUPABASE_ANON_KEY = '';   // e.g. 'eyJhbGciOiJIUzI1NiIs...'
+const SUPABASE_URL      = 'https://xiatsareoruybucwkpkc.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpYXRzYXJlb3J1eWJ1Y3drcGtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjgzOTcsImV4cCI6MjA4OTk0NDM5N30.l14cNOUt1PKqL0hl5VL5wpt2JRB9rG_gQlJeYeJNIqU';
 
 // ── OPTION B: Dynamic lookup from storage (default) ──────────
 const SUPABASE_CONFIG = {
