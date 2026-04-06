@@ -74,7 +74,11 @@ const DashboardPage = {
         DB.getAll('transactions', { limit: 500, order: 'date', asc: false }),
         DB.getAll('enrollments', { select: 'id, status, enrolled_at, level:level_id(course_id)' }),
         DB.getAll('attendance', { limit: 200, order: 'date', asc: false }),
-        DB.getAll('student_allocations', { select: 'id, price_paid, start_date', limit: 500 }),
+        // Fetch allocations with student + package join for breakdown display
+        DB.getAll('student_allocations', {
+          select: 'id, price_paid, start_date, student:student_id(full_name), package:package_id(name)',
+          limit: 500
+        }),
       ]);
 
       // ─── KPI Cards ───
@@ -83,16 +87,56 @@ const DashboardPage = {
       const parents = (users || []).filter(u => u.user_type === 'parent');
 
       const now = new Date();
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      // Use local date string for comparisons (avoid UTC midnight offset bugs)
+      const monthStartStr = Utils.localDateISO(new Date(now.getFullYear(), now.getMonth(), 1));
+      const monthEndStr   = Utils.localDateISO(new Date(now.getFullYear(), now.getMonth() + 1, 0));
 
-      // Monthly income = manual transactions + package allocations in this month
-      const monthTxIncome = (transactions || [])
-        .filter(t => t.type === 'income' && new Date(t.date) >= monthStart)
-        .reduce((s, t) => s + Number(t.amount), 0);
-      const monthAllocIncome = (allocations || [])
-        .filter(a => a.start_date && new Date(a.start_date) >= monthStart && Number(a.price_paid) > 0)
-        .reduce((s, a) => s + Number(a.price_paid), 0);
+      // Build dedup set ONCE — allocation IDs that already have a linked auto-transaction
+      const allocsWithTx = new Set(
+        (transactions || [])
+          .map(t => { const m = (t.description || '').match(/\[alloc:([^\]]+)\]/); return m ? m[1] : null; })
+          .filter(Boolean)
+      );
+
+      // ── This-month income transactions ──
+      const monthTxRows = (transactions || [])
+        .filter(t => t.type === 'income' && (t.date || '') >= monthStartStr && (t.date || '') <= monthEndStr);
+      const monthTxIncome = monthTxRows.reduce((s, t) => s + Number(t.amount), 0);
+
+      // ── Orphan allocations this month (no linked auto-tx) ──
+      const monthOrphanAllocs = (allocations || [])
+        .filter(a => a.start_date && a.start_date >= monthStartStr && a.start_date <= monthEndStr
+          && Number(a.price_paid) > 0 && !allocsWithTx.has(a.id));
+      const monthAllocIncome = monthOrphanAllocs.reduce((s, a) => s + Number(a.price_paid), 0);
+
       const monthIncome = monthTxIncome + monthAllocIncome;
+
+      // ── Revenue breakdown: what makes up this month's income ──
+      // (auto-linked subscription transactions + orphan allocs + other manual income)
+      const monthSubTxRows = monthTxRows.filter(t => (t.description || '').match(/\[alloc:[^\]]+\]/));
+      const monthManualTxRows = monthTxRows.filter(t => !(t.description || '').match(/\[alloc:[^\]]+\]/));
+      this._revenueBreakdown = {
+        monthStr: now.toLocaleString('default', { month: 'long', year: 'numeric' }),
+        total: monthIncome,
+        subscriptionTx: monthSubTxRows.map(t => ({
+          label: (t.description || 'Package payment').replace(/\s*\[alloc:[^\]]+\]/g, '').trim() || 'Package payment',
+          who: t.user_entity || '',
+          amount: Number(t.amount),
+          date: t.date,
+        })),
+        orphanAllocs: monthOrphanAllocs.map(a => ({
+          label: a.package?.name || 'Package',
+          who: a.student?.full_name || '',
+          amount: Number(a.price_paid),
+          date: a.start_date,
+        })),
+        manualTx: monthManualTxRows.map(t => ({
+          label: t.description || t.category || 'Income',
+          who: t.user_entity || '',
+          amount: Number(t.amount),
+          date: t.date,
+        })),
+      };
 
       const totalEnrollments  = (enrollments || []).length;
       const activeEnrollments = (enrollments || []).filter(e => e.status === 'active').length;
@@ -102,11 +146,12 @@ const DashboardPage = {
         { icon: 'fa-users',       color: '#6366f1', bg: 'rgba(99,102,241,.1)',  value: activeStudents.length, label: 'Active Students', change: `${students.length} total`, up: true },
         { icon: 'fa-book-open',   color: '#22c55e', bg: 'rgba(34,197,94,.1)',   value: (courses || []).filter(c => c.status === 'active').length, label: 'Active Courses', change: `${totalEnrollments} enrollments`, up: true },
         { icon: 'fa-percent',     color: '#f59e0b', bg: 'rgba(245,158,11,.1)',  value: retentionRate + '%', label: 'Retention Rate', change: `${activeEnrollments} active`, up: retentionRate > 70 },
-        { icon: 'fa-dollar-sign', color: '#22c55e', bg: 'rgba(34,197,94,.1)',   value: Utils.formatCurrency(monthIncome), label: 'Monthly Revenue', change: 'Transactions + Packages', up: true },
+        { icon: 'fa-dollar-sign', color: '#22c55e', bg: 'rgba(34,197,94,.1)',  value: Utils.formatCurrency(monthIncome), label: 'Monthly Revenue',
+          change: 'Click for breakdown', up: true, clickable: true, onclick: 'DashboardPage.showRevenueBreakdown()' },
       ]);
 
-      // ─── Revenue Chart (transactions + allocation income) ───
-      this.renderRevenueChart(transactions || [], enrollments || [], allocations || []);
+      // ─── Revenue Chart — pass allocsWithTx so it can dedup properly ───
+      this.renderRevenueChart(transactions || [], enrollments || [], allocations || [], allocsWithTx);
 
       // ─── Attendance Chart ───
       this.renderAttendanceChart(attendance || []);
@@ -130,7 +175,8 @@ const DashboardPage = {
     const grid = document.getElementById('kpi-grid');
     if (!grid) return;
     grid.innerHTML = kpis.map(k => `
-      <div class="card kpi-card">
+      <div class="card kpi-card${k.clickable ? ' kpi-card--clickable' : ''}"
+        ${k.onclick ? `onclick="${k.onclick}" style="cursor:pointer"` : ''}>
         <div class="kpi-icon-wrap" style="background:${k.bg}; color:${k.color}">
           <i class="fas ${k.icon}"></i>
         </div>
@@ -139,15 +185,73 @@ const DashboardPage = {
         <div class="kpi-change ${k.up ? 'up' : 'down'}">
           <i class="fas fa-arrow-${k.up ? 'up' : 'down'}"></i>
           ${Utils.esc(k.change)}
+          ${k.clickable ? '<i class="fas fa-info-circle" style="margin-left:4px;opacity:.7"></i>' : ''}
         </div>
       </div>
     `).join('');
   },
 
-  renderRevenueChart(transactions, enrollments, allocations) {
+  showRevenueBreakdown() {
+    const b = this._revenueBreakdown;
+    if (!b) return;
+
+    const rowHTML = (items, color, icon) => items.length === 0 ? '' : items.map(it => `
+      <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border-color)">
+        <div style="width:30px;height:30px;border-radius:50%;background:${color}22;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+          <i class="fas ${icon}" style="color:${color};font-size:12px"></i>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:var(--font-size-sm);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${Utils.esc(it.label)}</div>
+          ${it.who ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(it.who)} · ${Utils.formatDate(it.date)}</div>` : `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.formatDate(it.date)}</div>`}
+        </div>
+        <div style="font-weight:700;font-size:var(--font-size-sm);color:${color};flex-shrink:0">${Utils.formatCurrency(it.amount)}</div>
+      </div>
+    `).join('');
+
+    const subRows  = rowHTML(b.subscriptionTx, '#6366f1', 'fa-box');
+    const allocRows = rowHTML(b.orphanAllocs,   '#8b5cf6', 'fa-tag');
+    const manRows  = rowHTML(b.manualTx,        '#22c55e', 'fa-wallet');
+
+    const hasAny = b.subscriptionTx.length || b.orphanAllocs.length || b.manualTx.length;
+
+    Modal.open(`💰 Revenue Breakdown — ${b.monthStr}`, `
+      <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+        <span style="color:var(--text-muted);font-size:var(--font-size-sm)">All income sources this month</span>
+        <span style="font-size:var(--font-size-lg);font-weight:800;color:var(--brand-primary)">${Utils.formatCurrency(b.total)}</span>
+      </div>
+      ${!hasAny ? '<div class="empty-state"><i class="fas fa-receipt"></i><p>No income recorded this month yet.</p></div>' : ''}
+      ${subRows || allocRows ? `
+        <div style="font-size:var(--font-size-xs);font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+          color:var(--text-muted);margin:8px 0 4px">📦 Package Payments</div>
+        ${subRows}${allocRows}
+        ${!subRows && !allocRows ? '<p style="color:var(--text-muted);font-size:var(--font-size-sm);padding:8px 0">None</p>' : ''}
+      ` : ''}
+      ${manRows ? `
+        <div style="font-size:var(--font-size-xs);font-weight:700;text-transform:uppercase;letter-spacing:.06em;
+          color:var(--text-muted);margin:16px 0 4px">💼 Other Income</div>
+        ${manRows}
+      ` : ''}
+      <div style="margin-top:16px;padding:12px;background:var(--bg-tertiary);border-radius:var(--radius-md);
+        display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:600">Total this month</span>
+        <span style="font-size:var(--font-size-lg);font-weight:800;color:var(--brand-primary)">${Utils.formatCurrency(b.total)}</span>
+      </div>
+    `);
+  },
+
+  renderRevenueChart(transactions, enrollments, allocations, allocsWithTx) {
     const ctx = document.getElementById('chart-revenue');
     if (!ctx) return;
     if (this.charts.revenue) { this.charts.revenue.destroy(); }
+
+    // Build dedup set if not passed in (fallback safety)
+    if (!allocsWithTx) {
+      allocsWithTx = new Set(
+        (transactions || [])
+          .map(t => { const m = (t.description || '').match(/\[alloc:([^\]]+)\]/); return m ? m[1] : null; })
+          .filter(Boolean)
+      );
+    }
 
     // Build last 6 months
     const months = [];
@@ -158,25 +262,28 @@ const DashboardPage = {
     for (let i = 5; i >= 0; i--) {
       const d      = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const label  = d.toLocaleString('default', { month: 'short', year: '2-digit' });
-      const mStart = new Date(d.getFullYear(), d.getMonth(), 1);
-      const mEnd   = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
+      // Use local date strings for range comparisons (avoids UTC offset bugs)
+      const s      = Utils.localDateISO(new Date(d.getFullYear(), d.getMonth(), 1));
+      const e      = Utils.localDateISO(new Date(d.getFullYear(), d.getMonth() + 1, 0));
       months.push(label);
 
-      // Revenue: manual transactions income + package allocation income
+      // Revenue: transactions income + orphan allocation income (no double-counting)
       const txIncome = (transactions || [])
-        .filter(t => t.type === 'income' && new Date(t.date) >= mStart && new Date(t.date) <= mEnd)
-        .reduce((s, t) => s + Number(t.amount), 0);
+        .filter(t => t.type === 'income' && (t.date || '') >= s && (t.date || '') <= e)
+        .reduce((s2, t) => s2 + Number(t.amount), 0);
       const allocIncome = (allocations || [])
-        .filter(a => a.start_date && Number(a.price_paid) > 0 && new Date(a.start_date) >= mStart && new Date(a.start_date) <= mEnd)
-        .reduce((s, a) => s + Number(a.price_paid), 0);
+        .filter(a => a.start_date && Number(a.price_paid) > 0
+          && !allocsWithTx.has(a.id)
+          && a.start_date >= s && a.start_date <= e)
+        .reduce((s2, a) => s2 + Number(a.price_paid), 0);
       incomeData.push(txIncome + allocIncome);
 
-      // Real enrollment count by enrolled_at date
+      // Real enrollment count by enrolled_at date (s=start, e=end date strings)
       const count = (enrollments || [])
-        .filter(e => {
-          if (!e.enrolled_at) return false;
-          const d2 = new Date(e.enrolled_at);
-          return d2 >= mStart && d2 <= mEnd;
+        .filter(enr => {
+          if (!enr.enrolled_at) return false;
+          const eDate = (enr.enrolled_at || '').slice(0, 10);
+          return eDate >= s && eDate <= e;
         }).length;
       enrollData.push(count);
     }
