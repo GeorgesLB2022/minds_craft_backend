@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS users (
   notes         TEXT,
   app_password  TEXT,
   avatar_color  TEXT DEFAULT '#22c55e',
+  avatar_url    TEXT,                          -- optional profile photo (URL or base64)
   created_at    TIMESTAMPTZ DEFAULT NOW(),
   updated_at    TIMESTAMPTZ DEFAULT NOW()
 );
@@ -92,6 +93,29 @@ CREATE TABLE IF NOT EXISTS trainer_assignments (
   created_at  TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE (trainer_id, level_id)
 );
+
+-- ============================================================
+-- TRAINER SESSIONS (Attendance + Cost tracking per trainer per level)
+-- ============================================================
+-- Run this ALTER if the table already exists without these columns:
+-- ALTER TABLE trainer_sessions ADD COLUMN IF NOT EXISTS notes TEXT;
+CREATE TABLE IF NOT EXISTS trainer_sessions (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  trainer_id  UUID NOT NULL REFERENCES trainers(id) ON DELETE CASCADE,
+  level_id    UUID NOT NULL REFERENCES levels(id) ON DELETE CASCADE,
+  session_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  attended    BOOLEAN NOT NULL DEFAULT true,
+  sessions_count INT NOT NULL DEFAULT 1,   -- number of sessions in this log entry
+  fee_override NUMERIC(10,2) DEFAULT NULL, -- override trainer fee_session for this entry
+  notes       TEXT,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- RLS
+ALTER TABLE trainer_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can do everything" ON trainer_sessions
+  FOR ALL USING (auth.role() = 'authenticated');
 
 -- ============================================================
 -- ENROLLMENTS TABLE
@@ -521,6 +545,9 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS image_url TEXT;
 ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS recipient_name    TEXT;
 ALTER TABLE notification_logs ADD COLUMN IF NOT EXISTS recipient_contact TEXT;
 
+-- M7: Add recipient_target to notification_rules (student | parent | both)
+ALTER TABLE notification_rules ADD COLUMN IF NOT EXISTS recipient_target TEXT DEFAULT 'student';
+
 -- M5: Assessment sessions support
 -- Allow multiple independent assessment sessions per student per skill.
 -- Sessions are grouped client-side by the assessed_at timestamp (to the minute).
@@ -543,6 +570,26 @@ CREATE INDEX IF NOT EXISTS idx_assessments_student_time
 
 -- M5b: session_id column (optional — kept for forward compatibility, not required by the app)
 ALTER TABLE assessments ADD COLUMN IF NOT EXISTS session_id UUID;
+
+-- M8: Add avatar_url to users (profile photo — URL or base64)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+
+-- M9: trainer_sessions table (attendance log per trainer per level)
+CREATE TABLE IF NOT EXISTS trainer_sessions (
+  id             UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  trainer_id     UUID NOT NULL REFERENCES trainers(id) ON DELETE CASCADE,
+  level_id       UUID NOT NULL REFERENCES levels(id) ON DELETE CASCADE,
+  session_date   DATE NOT NULL DEFAULT CURRENT_DATE,
+  attended       BOOLEAN NOT NULL DEFAULT true,
+  sessions_count INT NOT NULL DEFAULT 1,
+  fee_override   NUMERIC(10,2) DEFAULT NULL,
+  notes          TEXT,
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE trainer_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY IF NOT EXISTS "Authenticated users can do everything on trainer_sessions"
+  ON trainer_sessions FOR ALL USING (auth.role() = 'authenticated');
 
 -- End of migration script
 -- ============================================================
