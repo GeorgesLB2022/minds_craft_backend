@@ -44,14 +44,24 @@ const Utils = {
     return this.formatDate(dateStr, format);
   },
 
+  // Returns YYYY-MM-DD using LOCAL timezone (not UTC) for a given Date object (defaults to now).
+  // Always use this instead of new Date().toISOString().slice(0,10) which returns UTC date.
+  localDateISO(d) {
+    const dt = d || new Date();
+    const y = dt.getFullYear();
+    const m = String(dt.getMonth() + 1).padStart(2, '0');
+    const day = String(dt.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  },
+
   todayISO() {
-    return new Date().toISOString().slice(0, 10);
+    return this.localDateISO();
   },
 
   monthRange() {
     const now = new Date();
-    const start = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-    const end = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+    const start = this.localDateISO(new Date(now.getFullYear(), now.getMonth(), 1));
+    const end   = this.localDateISO(new Date(now.getFullYear(), now.getMonth() + 1, 0));
     return { start, end };
   },
 
@@ -151,7 +161,7 @@ const Toast = {
 // ─────────────────────────────────────────────
 const Modal = {
   open(title, bodyHTML, opts = {}) {
-    document.getElementById('modal-title').textContent = title;
+    document.getElementById('modal-title').innerHTML = title;
     document.getElementById('modal-body').innerHTML = bodyHTML;
     const box = document.getElementById('modal-box');
     box.className = 'modal' + (opts.size ? ` modal-${opts.size}` : '');
