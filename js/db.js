@@ -204,7 +204,7 @@ const DB = {
     if (!_supabase) return { data: null, error: new Error('Not initialized') };
     const { data, error } = await _supabase
       .from('enrollments')
-      .upsert({ student_id: studentId, level_id: levelId, status, enrolled_at: new Date().toISOString().slice(0,10) }, { onConflict: 'student_id,level_id' })
+      .upsert({ student_id: studentId, level_id: levelId, status, enrolled_at: Utils.localDateISO() }, { onConflict: 'student_id,level_id' })
       .select()
       .single();
     return { data, error };
@@ -286,6 +286,31 @@ const DB = {
     const rows = trainerIds.map(tid => ({ trainer_id: tid, level_id: levelId }));
     return this.insertMany('trainer_assignments', rows);
   },
+
+  // ─────────────────────────────────────────────
+  // TRAINER SESSIONS
+  // ─────────────────────────────────────────────
+  async getTrainerSessions(opts = {}) {
+    return this.getAll('trainer_sessions', {
+      select: '*, trainer:trainer_id(id, full_name, fee_session), level:level_id(id, name, day_of_week, course:course_id(id, name))',
+      order: 'session_date',
+      asc: false,
+      ...opts,
+    });
+  },
+
+  async getTrainerSessionsByTrainer(trainerId) {
+    return this.getAll('trainer_sessions', {
+      select: '*, level:level_id(id, name, day_of_week, course:course_id(id, name))',
+      filter: { trainer_id: trainerId },
+      order: 'session_date',
+      asc: false,
+    });
+  },
+
+  async createTrainerSession(data)      { return this.insert('trainer_sessions', data); },
+  async updateTrainerSession(id, data)  { return this.update('trainer_sessions', id, data); },
+  async deleteTrainerSession(id)        { return this.remove('trainer_sessions', id); },
 
   // ─────────────────────────────────────────────
   // EVENTS
