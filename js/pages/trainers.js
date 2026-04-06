@@ -14,6 +14,9 @@ const TrainersPage = {
           <p>Manage trainers and their course level assignments.</p>
         </div>
         <div class="page-header-actions">
+          <button class="btn btn-secondary" onclick="TrainersPage.openCostForecast()">
+            <i class="fas fa-chart-bar"></i> Cost Forecast
+          </button>
           <button class="btn btn-primary" onclick="TrainersPage.openOnboard()">
             <i class="fas fa-plus"></i> Onboard New Trainer
           </button>
@@ -167,9 +170,12 @@ const TrainersPage = {
         </div>
 
         <!-- Actions -->
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-primary btn-sm" style="flex:1" onclick="TrainersPage.manageAssignments('${t.id}')">
-            <i class="fas fa-layer-group"></i> Manage Assignments
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" style="flex:1;min-width:110px" onclick="TrainersPage.manageAssignments('${t.id}')">
+            <i class="fas fa-layer-group"></i> Assignments
+          </button>
+          <button class="btn btn-primary btn-sm" style="flex:1;min-width:110px" onclick="TrainersPage.openAttendance('${t.id}')">
+            <i class="fas fa-calendar-check"></i> Attendance
           </button>
           <button class="btn btn-ghost btn-icon btn-sm" onclick="TrainersPage.openEdit('${t.id}')"><i class="fas fa-edit"></i></button>
           <button class="btn btn-danger btn-icon btn-sm" onclick="TrainersPage.deleteTrainer('${t.id}', '${Utils.esc(t.full_name)}')"><i class="fas fa-trash"></i></button>
@@ -331,5 +337,338 @@ const TrainersPage = {
       Modal.close();
       await this.loadTrainers(); // refresh cards to show updated levels
     } catch (err) { Toast.error(err.message || 'Failed to save assignments'); }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // TRAINER ATTENDANCE — log sessions attended per level
+  // ─────────────────────────────────────────────────────────────────────────
+  async openAttendance(trainerId) {
+    const trainer = this.trainers.find(t => t.id === trainerId);
+    if (!trainer) return;
+    Modal.open(`📋 Attendance — ${trainer.full_name}`, `
+      <div id="trainer-att-body"><div class="page-loading"><i class="fas fa-spinner fa-spin"></i></div></div>
+    `);
+    await this._renderAttendanceModal(trainerId, trainer);
+  },
+
+  async _renderAttendanceModal(trainerId, trainer) {
+    const [{ data: sessions }, { data: allLevels }, { data: assignments }] = await Promise.all([
+      DB.getTrainerSessionsByTrainer(trainerId),
+      DB.getAll('levels', { select: 'id, name, day_of_week, course:course_id(id, name)', order: 'name' }),
+      DB.getAll('trainer_assignments', { filter: { trainer_id: trainerId },
+        select: 'level_id' }),
+    ]);
+
+    // Assigned level IDs (from trainer_assignments + legacy trainer_id)
+    const assignedIds = new Set([
+      ...(assignments || []).map(a => a.level_id),
+      ...(trainer._levels || []).map(lv => lv.id),
+    ]);
+    const myLevels = (allLevels || []).filter(lv => assignedIds.has(lv.id));
+
+    const el = document.getElementById('trainer-att-body');
+    if (!el) return;
+
+    const sessionRows = (sessions || []).map(s => {
+      const fee = s.fee_override != null ? Number(s.fee_override) : Number(trainer.fee_session || 0);
+      const cost = fee * (s.sessions_count || 1);
+      return `
+        <tr>
+          <td style="padding:8px 6px;font-size:var(--font-size-sm)">${Utils.formatDate(s.session_date)}</td>
+          <td style="padding:8px 6px;font-size:var(--font-size-sm)">${Utils.esc(s.level?.name || '—')}</td>
+          <td style="padding:8px 6px;font-size:var(--font-size-sm)">${Utils.esc(s.level?.course?.name || '—')}</td>
+          <td style="padding:8px 6px;text-align:center">
+            <span class="badge ${s.attended ? 'badge-green' : 'badge-red'}">${s.attended ? 'Present' : 'Absent'}</span>
+          </td>
+          <td style="padding:8px 6px;text-align:center;font-size:var(--font-size-sm)">${s.sessions_count || 1}</td>
+          <td style="padding:8px 6px;text-align:right;font-size:var(--font-size-sm);font-weight:600;color:var(--brand-primary)">${Utils.formatCurrency(cost)}</td>
+          <td style="padding:8px 6px;text-align:center">
+            <button class="btn btn-ghost btn-icon btn-sm" onclick="TrainersPage._deleteSession('${s.id}','${trainerId}')">
+              <i class="fas fa-trash" style="color:var(--brand-danger)"></i>
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const totalSessions = (sessions || []).filter(s => s.attended).reduce((a, s) => a + (s.sessions_count || 1), 0);
+    const totalCost = (sessions || []).reduce((a, s) => {
+      const fee = s.fee_override != null ? Number(s.fee_override) : Number(trainer.fee_session || 0);
+      return a + fee * (s.sessions_count || 1);
+    }, 0);
+
+    const levelOptions = myLevels.length
+      ? myLevels.map(lv => `<option value="${lv.id}">${Utils.esc(lv.course?.name || '')} › ${Utils.esc(lv.name)}</option>`).join('')
+      : '<option value="">No levels assigned</option>';
+
+    el.innerHTML = `
+      <!-- Add session form -->
+      <form onsubmit="TrainersPage._logSession(event,'${trainerId}')"
+        style="background:var(--bg-tertiary);border-radius:var(--radius-md);padding:14px;margin-bottom:16px;
+          border:1px solid var(--border-color)">
+        <div style="font-weight:700;font-size:var(--font-size-sm);margin-bottom:10px">
+          <i class="fas fa-plus-circle" style="color:var(--brand-primary);margin-right:6px"></i>Log New Session
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+          <div class="form-group" style="margin:0">
+            <label class="form-label">Level</label>
+            <select name="level_id" class="form-select" required ${!myLevels.length ? 'disabled' : ''}>
+              ${levelOptions}
+            </select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="form-label">Date</label>
+            <input type="date" name="session_date" class="form-input" value="${Utils.todayISO()}" required />
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="form-label">Sessions Count</label>
+            <input type="number" name="sessions_count" class="form-input" value="1" min="1" max="20" />
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="form-label">Fee Override ($) <span style="font-size:10px;color:var(--text-muted)">(blank = default)</span></label>
+            <input type="number" name="fee_override" class="form-input" step="0.01" placeholder="${trainer.fee_session || 0}" />
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:var(--font-size-sm);cursor:pointer">
+            <input type="checkbox" name="attended" value="1" checked
+              style="width:15px;height:15px;accent-color:var(--brand-primary)" />
+            Attended
+          </label>
+          <div class="form-group" style="margin:0;flex:1;min-width:140px">
+            <input type="text" name="notes" class="form-input" placeholder="Notes (optional)" />
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm">
+            <i class="fas fa-save"></i> Log Session
+          </button>
+        </div>
+      </form>
+
+      <!-- Summary bar -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        ${[
+          { label: 'Sessions attended', val: totalSessions, color: '#22c55e' },
+          { label: 'Total cost', val: Utils.formatCurrency(totalCost), color: '#6366f1' },
+          { label: 'Default fee', val: Utils.formatCurrency(trainer.fee_session || 0) + ' / session', color: '#f59e0b' },
+        ].map(c => `
+          <div style="flex:1;min-width:130px;padding:10px 14px;border-radius:var(--radius-md);
+            border:1px solid ${c.color}33;background:${c.color}11;text-align:center">
+            <div style="font-weight:800;font-size:var(--font-size-md);color:${c.color}">${c.val}</div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:2px">${c.label}</div>
+          </div>
+        `).join('')}
+      </div>
+
+      <!-- Session log table -->
+      ${sessions && sessions.length ? `
+        <div style="overflow-x:auto">
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="border-bottom:2px solid var(--border-color);font-size:var(--font-size-xs);
+                color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">
+                <th style="padding:6px;text-align:left">Date</th>
+                <th style="padding:6px;text-align:left">Level</th>
+                <th style="padding:6px;text-align:left">Course</th>
+                <th style="padding:6px;text-align:center">Status</th>
+                <th style="padding:6px;text-align:center">Sessions</th>
+                <th style="padding:6px;text-align:right">Cost</th>
+                <th style="padding:6px"></th>
+              </tr>
+            </thead>
+            <tbody>${sessionRows}</tbody>
+          </table>
+        </div>
+      ` : `<div class="empty-state"><i class="fas fa-calendar-times"></i><p>No sessions logged yet.</p></div>`}
+    `;
+  },
+
+  async _logSession(e, trainerId) {
+    e.preventDefault();
+    const fd   = new FormData(e.target);
+    const data = Object.fromEntries(fd.entries());
+    data.trainer_id     = trainerId;
+    data.attended       = fd.has('attended');
+    data.sessions_count = parseInt(data.sessions_count) || 1;
+    data.fee_override   = data.fee_override !== '' ? parseFloat(data.fee_override) : null;
+    if (!data.notes) data.notes = null;
+
+    try {
+      const { error } = await DB.createTrainerSession(data);
+      if (error) throw error;
+      Toast.success('Session logged!');
+      const trainer = this.trainers.find(t => t.id === trainerId);
+      await this._renderAttendanceModal(trainerId, trainer);
+    } catch (err) { Toast.error(err.message || 'Failed to log session'); }
+  },
+
+  async _deleteSession(sessionId, trainerId) {
+    if (!confirm('Remove this session log?')) return;
+    const { error } = await DB.deleteTrainerSession(sessionId);
+    if (error) return Toast.error(error.message);
+    Toast.success('Session removed');
+    const trainer = this.trainers.find(t => t.id === trainerId);
+    await this._renderAttendanceModal(trainerId, trainer);
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // TRAINER COST FORECAST — chart of projected monthly costs
+  // ─────────────────────────────────────────────────────────────────────────
+  _costChart: null,
+
+  async openCostForecast() {
+    Modal.open('📊 Trainer Cost Forecast', `
+      <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-bottom:12px">
+        Expected monthly cost per trainer based on logged sessions and default session fees.
+        Solid bars = past actual cost · Faded bars = projected (based on average sessions/month).
+      </div>
+      <div style="height:340px"><canvas id="trainer-cost-chart"></canvas></div>
+      <div id="trainer-cost-summary" style="margin-top:14px"></div>
+    `, { size: 'xl' });
+    setTimeout(() => this._buildCostChart(), 80);
+  },
+
+  async _buildCostChart() {
+    const ctx = document.getElementById('trainer-cost-chart');
+    if (!ctx) return;
+    if (this._costChart) { this._costChart.destroy(); this._costChart = null; }
+
+    // Load all sessions + trainer info
+    const { data: sessions } = await DB.getTrainerSessions({ limit: 2000 });
+    const allSessions = sessions || [];
+
+    const now = new Date();
+    const labels = [];
+    // Show 6 past months + 6 future months
+    for (let i = -5; i <= 6; i++) {
+      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      labels.push(d.toLocaleString('default', { month: 'short', year: '2-digit' }));
+    }
+
+    // Group sessions by trainer
+    const trainerMap = {};
+    allSessions.forEach(s => {
+      const tid = s.trainer_id;
+      if (!trainerMap[tid]) trainerMap[tid] = { name: s.trainer?.full_name || tid, feeDefault: Number(s.trainer?.fee_session || 0), sessions: [] };
+      trainerMap[tid].sessions.push(s);
+    });
+
+    // Also include trainers with no sessions yet but with a fee_session set
+    this.trainers.filter(t => t.fee_session > 0 && !trainerMap[t.id]).forEach(t => {
+      trainerMap[t.id] = { name: t.full_name, feeDefault: Number(t.fee_session || 0), sessions: [] };
+    });
+
+    const palette = ['#6366f1','#22c55e','#f59e0b','#ef4444','#8b5cf6','#ec4899','#14b8a6','#f97316'];
+    const datasets = [];
+    const summaryRows = [];
+
+    Object.values(trainerMap).forEach((tr, idx) => {
+      const color = palette[idx % palette.length];
+      const dataActual = [], dataForecast = [];
+
+      for (let i = -5; i <= 6; i++) {
+        const d    = new Date(now.getFullYear(), now.getMonth() + i, 1);
+        const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+        const s    = Utils.localDateISO(d);
+        const e    = Utils.localDateISO(mEnd);
+        const isPast = d <= now;
+
+        const monthSessions = tr.sessions.filter(ss =>
+          (ss.session_date || '') >= s && (ss.session_date || '') <= e && ss.attended
+        );
+        const actualCost = monthSessions.reduce((sum, ss) => {
+          const fee = ss.fee_override != null ? Number(ss.fee_override) : tr.feeDefault;
+          return sum + fee * (ss.sessions_count || 1);
+        }, 0);
+
+        if (isPast) {
+          dataActual.push(Math.round(actualCost * 100) / 100);
+          dataForecast.push(null);
+        } else {
+          dataActual.push(null);
+          // Forecast: use average sessions/month from past 3 months as projection base
+          const pastSessions = tr.sessions.filter(ss => ss.attended);
+          const avgSessionsPerMonth = pastSessions.length > 0
+            ? pastSessions.reduce((a, ss) => a + (ss.sessions_count || 1), 0) / Math.max(1,
+                [...new Set(pastSessions.map(ss => (ss.session_date || '').slice(0, 7)))].length)
+            : (tr._levels?.length || 4); // default: assume ~4 sessions/month if no history
+          const projectedCost = tr.feeDefault * avgSessionsPerMonth;
+          dataForecast.push(Math.round(projectedCost * 100) / 100);
+        }
+      }
+
+      // Total actual cost (all time)
+      const totalActual = tr.sessions.filter(s => s.attended).reduce((sum, s) => {
+        const fee = s.fee_override != null ? Number(s.fee_override) : tr.feeDefault;
+        return sum + fee * (s.sessions_count || 1);
+      }, 0);
+
+      summaryRows.push({ name: tr.name, totalActual, feeDefault: tr.feeDefault, color });
+
+      datasets.push({
+        label: tr.name + ' (actual)',
+        data: dataActual,
+        backgroundColor: color + 'CC',
+        borderRadius: 4,
+        stack: tr.name,
+        order: 2,
+      });
+      datasets.push({
+        label: tr.name + ' (forecast)',
+        data: dataForecast,
+        backgroundColor: color + '40',
+        borderColor: color,
+        borderWidth: 1.5,
+        borderRadius: 4,
+        stack: tr.name,
+        order: 1,
+      });
+    });
+
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gc = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+    const tc = isDark ? '#9ba8c4' : '#6b7280';
+
+    this._costChart = new Chart(ctx, {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: tc, font: { size: 10 }, filter: (item) => item.text.includes('actual') } },
+          tooltip: {
+            callbacks: { label: c => ` ${c.dataset.label}: $${(c.parsed.y || 0).toFixed(2)}` }
+          },
+        },
+        scales: {
+          x: { stacked: true, grid: { color: gc }, ticks: { color: tc } },
+          y: { stacked: true, grid: { color: gc }, ticks: { color: tc, callback: v => '$' + v } },
+        },
+      },
+    });
+
+    // Summary table
+    const summaryEl = document.getElementById('trainer-cost-summary');
+    if (summaryEl && summaryRows.length) {
+      summaryEl.innerHTML = `
+        <div style="font-weight:700;font-size:var(--font-size-sm);margin-bottom:8px;color:var(--text-secondary)">
+          Trainer Summary
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          ${summaryRows.map(r => `
+            <div style="flex:1;min-width:160px;padding:10px 14px;border-radius:var(--radius-md);
+              border:1px solid ${r.color}33;background:${r.color}11">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
+                <div style="width:8px;height:8px;border-radius:50%;background:${r.color}"></div>
+                <span style="font-weight:700;font-size:var(--font-size-sm)">${Utils.esc(r.name)}</span>
+              </div>
+              <div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.formatCurrency(r.feeDefault)} / session</div>
+              <div style="font-size:var(--font-size-sm);font-weight:600;color:${r.color};margin-top:4px">
+                Total paid: ${Utils.formatCurrency(r.totalActual)}
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
   },
 };
