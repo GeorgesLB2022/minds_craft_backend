@@ -752,6 +752,45 @@ const NotificationsPage = {
           </div>
         </div>
 
+        <!-- Recipient Target -->
+        <div class="form-group">
+          <label class="form-label">
+            Send Notification To
+            <span style="font-size:10px;color:var(--text-muted);margin-left:4px">Who receives this message?</span>
+          </label>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+            ${['student','parent','both'].map(opt => {
+              const icons = { student:'fa-user-graduate', parent:'fa-user', both:'fa-users' };
+              const labels = { student:'Student directly', parent:'Parent only', both:'Both student & parent' };
+              const checked = (r?.recipient_target || 'student') === opt;
+              return `
+                <label style="display:flex;flex-direction:column;align-items:center;gap:6px;
+                  padding:10px 8px;border-radius:var(--radius-md);cursor:pointer;
+                  border:2px solid ${checked ? 'var(--brand-primary)' : 'var(--border-color)'};
+                  background:${checked ? 'rgba(99,102,241,.08)' : 'var(--bg-tertiary)'};
+                  transition:.15s" id="rt-label-${opt}"
+                  onclick="document.querySelectorAll('[name=recipient_target]').forEach(r=>{
+                    r.closest ? null : null;
+                  });">
+                  <input type="radio" name="recipient_target" value="${opt}" ${checked ? 'checked' : ''}
+                    style="display:none"
+                    onchange="document.querySelectorAll('#rt-label-student,#rt-label-parent,#rt-label-both').forEach(el=>{
+                      const inp=el.querySelector('input');if(inp){
+                        el.style.borderColor=inp.checked?'var(--brand-primary)':'var(--border-color)';
+                        el.style.background=inp.checked?'rgba(99,102,241,.08)':'var(--bg-tertiary)';
+                      }})" />
+                  <i class="fas ${icons[opt]}" style="font-size:1.2rem;color:${checked ? 'var(--brand-primary)' : 'var(--text-muted)'}"></i>
+                  <span style="font-size:11px;font-weight:600;text-align:center;color:${checked ? 'var(--brand-primary)' : 'var(--text-secondary)'}">${labels[opt]}</span>
+                </label>`;
+            }).join('')}
+          </div>
+          <p style="font-size:11px;color:var(--text-muted);margin-top:6px">
+            <i class="fas fa-info-circle"></i>
+            Parent contact is used when a student has a linked parent account (parent_id set).
+            If no parent is found, falls back to the student’s own contact.
+          </p>
+        </div>
+
         <div class="form-group">
           <label class="form-label">Status</label>
           <div class="toggle-wrap">
@@ -778,12 +817,13 @@ const NotificationsPage = {
     const form = e.target;
     const fd   = new FormData(form);
     const data = {
-      title:          fd.get('title'),
-      trigger_event:  fd.get('trigger_event'),
-      channels:       fd.getAll('channels'),
-      email_template: fd.get('email_template') || null,
-      sms_template:   fd.get('sms_template')   || null,
-      is_active:      form.querySelector('[name="is_active"]')?.checked ?? true,
+      title:            fd.get('title'),
+      trigger_event:    fd.get('trigger_event'),
+      channels:         fd.getAll('channels'),
+      email_template:   fd.get('email_template')   || null,
+      sms_template:     fd.get('sms_template')     || null,
+      recipient_target: fd.get('recipient_target') || 'student',
+      is_active:        form.querySelector('[name="is_active"]')?.checked ?? true,
     };
     try {
       const result = id
@@ -836,33 +876,85 @@ const NotificationsPage = {
     };
 
     for (const rule of matchingRules) {
+      // ── Resolve who to contact based on rule.recipient_target ──────────────
+      const target = rule.recipient_target || 'student'; // 'student' | 'parent' | 'both'
+
+      // Build list of contacts to send to
+      let contacts = []; // [{name, email, phone, label}]
+
+      // Student contact (always available from trigger data)
+      const studentContact = {
+        name:  data.full_name || data.name || '',
+        email: data.email  || '',
+        phone: data.phone  || '',
+        label: 'student',
+      };
+
+      // Parent contact — look up via parent_id on the student record
+      let parentContact = null;
+      if ((target === 'parent' || target === 'both') && data.student_id) {
+        try {
+          const { data: student } = await DB.getOne('users', data.student_id);
+          if (student?.parent_id) {
+            const { data: parent } = await DB.getOne('users', student.parent_id);
+            if (parent) {
+              parentContact = {
+                name:  parent.full_name || '',
+                email: parent.email     || '',
+                phone: parent.phone     || '',
+                label: 'parent',
+              };
+            }
+          }
+        } catch(e) { /* parent lookup failed — ignore */ }
+      }
+
+      if (target === 'student') {
+        contacts = [studentContact];
+      } else if (target === 'parent') {
+        // Use parent if found, otherwise fall back to student
+        contacts = [parentContact || studentContact];
+      } else { // both
+        contacts = [studentContact];
+        if (parentContact) contacts.push(parentContact);
+      }
+
       for (const ch of (rule.channels || ['email'])) {
         const template = ch === 'email' ? rule.email_template : rule.sms_template;
-        const body     = this._fillTemplate(
-          template || this._defaultTriggerMsg(triggerEvent, vars), vars
-        );
         const subject  = rule.title || `Notification — Minds' Craft`;
 
-        let ok = false;
+        for (const contact of contacts) {
+          // Merge contact vars so {fname} etc. resolve to the actual recipient
+          const contactVars = {
+            ...vars,
+            fname:    contact.name.split(' ')[0] || vars.fname,
+            lname:    contact.name.split(' ').slice(1).join(' ') || vars.lname,
+            full_name: contact.name || vars.full_name,
+          };
+          const body = this._fillTemplate(
+            template || this._defaultTriggerMsg(triggerEvent, contactVars), contactVars
+          );
 
-        if (ch === 'sms' && data.phone) {
-          const res = await this._sendSMS(data.phone, body);
-          ok = res.ok;
-        } else if (ch === 'email' && data.email && this._ejsReady()) {
-          const res = await this._sendEmail(data.email, subject, body, vars.fname || vars.full_name);
-          ok = res.ok;
+          let ok = false;
+          if (ch === 'sms' && contact.phone) {
+            const res = await this._sendSMS(contact.phone, body);
+            ok = res.ok;
+          } else if (ch === 'email' && contact.email && this._ejsReady()) {
+            const res = await this._sendEmail(contact.email, subject, body, contactVars.fname);
+            ok = res.ok;
+          }
+
+          await DB.logNotification({
+            rule_id:           rule.id,
+            recipient_id:      data.student_id || data.id || null,
+            recipient_name:    contact.name,
+            recipient_contact: ch === 'sms' ? contact.phone : contact.email,
+            channel:           ch,
+            subject:           subject,
+            body:              `[→ ${contact.label}] ` + body,
+            status:            ok ? 'sent' : 'failed',
+          });
         }
-
-        await DB.logNotification({
-          rule_id:           rule.id,
-          recipient_id:      data.student_id || data.id || null,
-          recipient_name:    data.full_name  || data.name || '',
-          recipient_contact: ch === 'sms' ? data.phone : data.email,
-          channel:           ch,
-          subject:           subject,
-          body:              body,
-          status:            ok ? 'sent' : 'failed',
-        });
       }
     }
 
@@ -948,50 +1040,76 @@ const NotificationsPage = {
 
     let sent = 0;
     for (const rule of expiryRules) {
+      const target = rule.recipient_target || 'student'; // 'student' | 'parent' | 'both'
+
       for (const alloc of expiring) {
         const student = alloc.student;
         if (!student) continue;
 
-        // This key is unique per student + per allocation end_date
-        // Once logged, this reminder will NEVER be sent again for this allocation
+        // Dedup key: unique per student + allocation end_date — sent only once ever
         const key = `${student.id}__${alloc.end_date}`;
-        if (alreadySent.has(key)) continue; // already sent — skip forever
+        if (alreadySent.has(key)) continue;
 
-        const vars = {
-          fname:       student.full_name?.split(' ')[0] || student.full_name || '',
+        const baseVars = {
+          fname:       student.full_name?.split(' ')[0] || '',
           lname:       student.full_name?.split(' ').slice(1).join(' ') || '',
+          full_name:   student.full_name || '',
           package:     alloc.package?.name || '',
           expiry_date: Utils.formatDate(alloc.end_date),
-          days_left:   '2',
+          days_left:   String(Math.ceil((new Date(alloc.end_date) - new Date()) / 86400000)),
           end_date:    Utils.formatDate(alloc.end_date),
         };
 
+        // Build contacts list based on recipient_target
+        const studentContact = { name: student.full_name, email: student.email, phone: student.phone, label: 'student' };
+        let contacts = [studentContact];
+
+        if (target === 'parent' || target === 'both') {
+          try {
+            const { data: fullStudent } = await DB.getOne('users', student.id);
+            if (fullStudent?.parent_id) {
+              const { data: parent } = await DB.getOne('users', fullStudent.parent_id);
+              if (parent) {
+                const parentContact = { name: parent.full_name, email: parent.email, phone: parent.phone, label: 'parent' };
+                contacts = target === 'parent' ? [parentContact] : [studentContact, parentContact];
+              }
+            }
+          } catch(e) { /* parent lookup failed */ }
+        }
+
         for (const ch of (rule.channels || ['email'])) {
-          const template = ch === 'email' ? rule.email_template : rule.sms_template;
-          const body     = this._fillTemplate(template || this._defaultExpiryMsg(vars), vars);
-          const subject  = rule.title || "Subscription Expiring Soon — Minds' Craft";
+          const subject = rule.title || "Subscription Expiring Soon — Minds' Craft";
 
-          let ok = false;
-          if (ch === 'sms' && student.phone) {
-            const res = await this._sendSMS(student.phone, body);
-            ok = res.ok;
-          } else if (ch === 'email' && student.email && this._ejsReady()) {
-            const res = await this._sendEmail(student.email, subject, body, vars.fname);
-            ok = res.ok;
+          for (const contact of contacts) {
+            const vars = {
+              ...baseVars,
+              fname:     contact.name?.split(' ')[0] || baseVars.fname,
+              full_name: contact.name || baseVars.full_name,
+            };
+            const template = ch === 'email' ? rule.email_template : rule.sms_template;
+            const body     = this._fillTemplate(template || this._defaultExpiryMsg(vars), vars);
+
+            let ok = false;
+            if (ch === 'sms' && contact.phone) {
+              const res = await this._sendSMS(contact.phone, body);
+              ok = res.ok;
+            } else if (ch === 'email' && contact.email && this._ejsReady()) {
+              const res = await this._sendEmail(contact.email, subject, body, vars.fname);
+              ok = res.ok;
+            }
+
+            await DB.logNotification({
+              rule_id:           rule.id,
+              recipient_id:      student.id,
+              recipient_name:    contact.name,
+              recipient_contact: ch === 'sms' ? contact.phone : contact.email,
+              channel:           ch,
+              subject:           '[EXPIRY REMINDER]',
+              body:              `${alloc.end_date} — [→ ${contact.label}] ${body}`,
+              status:            ok ? 'sent' : 'failed',
+            });
+            sent++;
           }
-
-          // Prefix body with end_date so duplicate check (body.slice(0,10)) works
-          await DB.logNotification({
-            rule_id:           rule.id,
-            recipient_id:      student.id,
-            recipient_name:    student.full_name,
-            recipient_contact: ch === 'sms' ? student.phone : student.email,
-            channel:           ch,
-            subject:           '[EXPIRY REMINDER]',
-            body:              `${alloc.end_date} — ${body}`,
-            status:            ok ? 'sent' : 'failed',
-          });
-          sent++;
         }
       }
     }
