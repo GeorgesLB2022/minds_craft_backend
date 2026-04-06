@@ -33,6 +33,7 @@ const FinancialsPage = {
 
       <div class="tabs">
         <button class="tab-btn active"  onclick="FinancialsPage.switchTab('overview',     this)">Overview</button>
+        <button class="tab-btn"         onclick="FinancialsPage.switchTab('analytics',    this)"><i class="fas fa-chart-line" style="margin-right:5px"></i>Analytics</button>
         <button class="tab-btn"         onclick="FinancialsPage.switchTab('packages',     this)">Packages</button>
         <button class="tab-btn"         onclick="FinancialsPage.switchTab('allocations',  this)">Student Allocations</button>
         <button class="tab-btn"         onclick="FinancialsPage.switchTab('transactions', this)">Transactions</button>
@@ -82,8 +83,16 @@ const FinancialsPage = {
   // ─────────────────────────────────────────────────────────────────────────
   getMonthStats() {
     const now    = new Date();
-    const mStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const mStartStr = mStart.toISOString().slice(0, 10);
+    const mStart    = new Date(now.getFullYear(), now.getMonth(), 1);
+    const mStartStr = Utils.localDateISO(mStart);
+
+    // ── Build set of allocation IDs already covered by a linked auto-transaction
+    //    (tagged [alloc:UUID] in description) — to avoid double-counting ────────
+    const allocsWithTx = new Set(
+      this.transactions
+        .map(t => { const m = (t.description || '').match(/\[alloc:([^\]]+)\]/); return m ? m[1] : null; })
+        .filter(Boolean)
+    );
 
     // ── Transactions (manual income + expenses) ──────────────────────────
     const monthTx      = this.transactions.filter(t => t.date >= mStartStr);
@@ -92,22 +101,18 @@ const FinancialsPage = {
     const allTxIncome  = this.transactions.filter(t => t.type === 'income' ).reduce((s, t) => s + Number(t.amount), 0);
     const allTxExpense = this.transactions.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.amount), 0);
 
-    // ── Allocations (package subscription income) ────────────────────────
-    // Use start_date as the "payment date" for an allocation
-    const monthAlloc = this.allocations.filter(a =>
-      a.price_paid > 0 && a.start_date && a.start_date >= mStartStr
-    );
-    const allocIncome    = monthAlloc.reduce((s, a) => s + Number(a.price_paid || 0), 0);
-    const allAllocIncome = this.allocations
-      .filter(a => a.price_paid > 0)
-      .reduce((s, a) => s + Number(a.price_paid || 0), 0);
+    // ── Allocations WITHOUT a linked transaction (legacy / pre-auto-tx) ──
+    //    Only these need to be added separately; newer ones are already in txIncome
+    const orphanAllocs    = this.allocations.filter(a => a.price_paid > 0 && !allocsWithTx.has(a.id));
+    const monthOrphan     = orphanAllocs.filter(a => a.start_date && a.start_date >= mStartStr);
+    const allocIncome     = monthOrphan.reduce((s, a) => s + Number(a.price_paid || 0), 0);
+    const allAllocIncome  = orphanAllocs.reduce((s, a) => s + Number(a.price_paid || 0), 0);
 
     return {
-      income:  txIncome  + allocIncome,      // this month: tx income + new subscriptions
-      expense: txExpense,                     // expenses from transactions only
+      income:  txIncome  + allocIncome,
+      expense: txExpense,
       net:    (txIncome + allocIncome) - txExpense,
       balance: (allTxIncome + allAllocIncome) - allTxExpense,
-      // expose breakdowns for the chart
       txIncome, txExpense, allocIncome, allTxIncome, allTxExpense, allAllocIncome,
     };
   },
@@ -120,6 +125,7 @@ const FinancialsPage = {
     if (!el) return;
     switch (this.currentTab) {
       case 'overview':     this.renderOverview(el);     break;
+      case 'analytics':    this.renderAnalytics(el);    break;
       case 'packages':     this.renderPackages(el);     break;
       case 'allocations':  this.renderAllocations(el);  break;
       case 'transactions': this.renderTransactions(el); break;
@@ -132,13 +138,18 @@ const FinancialsPage = {
   renderOverview(el) {
     const stats       = this.getMonthStats();   // always recalculated from live data
     const activeSubs  = this.allocations.filter(a => a.status === 'active').length;
-    const allAllocPaid = this.allocations.filter(a => a.price_paid > 0).reduce((s, a) => s + Number(a.price_paid || 0), 0);
+    // Total subscription revenue (for display label only):
+    //   = auto-linked tx income (tagged [alloc:]) + orphan allocation prices (no linked tx)
+    const _subTxIncome = this.transactions
+      .filter(t => t.type === 'income' && (t.description || '').match(/\[alloc:[^\]]+\]/))
+      .reduce((s, t) => s + Number(t.amount || 0), 0);
+    const allAllocPaid = _subTxIncome + stats.allAllocIncome;
 
     // Build informative sub-labels showing the breakdown
     const incomeSub = stats.allocIncome > 0
       ? `${Utils.formatCurrency(stats.txIncome)} tx + ${Utils.formatCurrency(stats.allocIncome)} subs`
       : 'This month';
-    const balanceSub = `tx: ${Utils.formatCurrency(stats.allTxIncome + stats.allAllocIncome)} in · ${Utils.formatCurrency(stats.allTxExpense)} out`;
+    const balanceSub = `${Utils.formatCurrency(stats.allTxIncome + stats.allAllocIncome)} in · ${Utils.formatCurrency(stats.allTxExpense)} out`;
 
     el.innerHTML = `
       <div class="financials-kpi-grid">
@@ -168,10 +179,15 @@ const FinancialsPage = {
           <div class="chart-container" style="height:260px"><canvas id="fin-chart"></canvas></div>
         </div>
         <div class="card" style="display:flex;flex-direction:column">
-          <div class="card-header">
+          <div class="card-header" style="flex-wrap:wrap;gap:8px">
             <div class="card-title">
               Due Packages
               <span class="badge badge-red" style="margin-left:6px">Action Required</span>
+            </div>
+            <div class="search-input-wrap" style="flex:1;min-width:130px;max-width:200px">
+              <i class="fas fa-search"></i>
+              <input type="text" id="due-pkg-search" placeholder="Search student…"
+                oninput="FinancialsPage.filterDuePackages(this.value)" />
             </div>
           </div>
           <div id="due-packages-list" style="overflow-y:auto;max-height:320px;padding-right:4px">${this.renderDuePackages()}</div>
@@ -191,20 +207,434 @@ const FinancialsPage = {
     setTimeout(() => this.renderFinChart(), 50);
   },
 
-  renderDuePackages() {
+  // ─────────────────────────────────────────────────────────────────────────
+  // ANALYTICS TAB — Income Forecast + Expenses chart
+  // ─────────────────────────────────────────────────────────────────────────
+  _forecastThreshold: 900,   // default $900/month threshold (editable)
+  _forecastChart: null,
+  _expenseChart: null,
+
+  renderAnalytics(el) {
+    el.innerHTML = `
+      <!-- ── Income Forecast ── -->
+      <div class="card" style="margin-bottom:1.25rem">
+        <div class="card-header" style="flex-wrap:wrap;gap:10px">
+          <div>
+            <div class="card-title">📈 Monthly Income Forecast</div>
+            <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">
+              Projected renewals from active packages over the next 12 months
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-left:auto">
+            <label style="font-size:var(--font-size-xs);color:var(--text-muted);white-space:nowrap">
+              <i class="fas fa-bullseye" style="color:#ef4444;margin-right:4px"></i>Target ($)
+            </label>
+            <input type="number" id="forecast-threshold" value="${this._forecastThreshold}"
+              min="0" step="50"
+              style="width:90px;padding:4px 8px;border-radius:var(--radius-sm);
+                border:1px solid var(--border-color);background:var(--bg-secondary);
+                color:var(--text-primary);font-size:var(--font-size-sm)"
+              oninput="FinancialsPage._forecastThreshold=Number(this.value)||0; FinancialsPage._buildForecastChart()" />
+          </div>
+        </div>
+        <div style="height:300px"><canvas id="forecast-chart"></canvas></div>
+        <div id="forecast-summary" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;padding:0 4px"></div>
+      </div>
+
+      <!-- ── Monthly Expenses ── -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">💸 Monthly Expenses</div>
+            <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">
+              Recorded expense transactions — last 12 months
+            </div>
+          </div>
+        </div>
+        <div style="height:280px"><canvas id="expense-chart"></canvas></div>
+        <div id="expense-summary" style="margin-top:10px;display:flex;flex-wrap:wrap;gap:8px;padding:0 4px"></div>
+      </div>
+    `;
+    setTimeout(() => {
+      this._buildForecastChart();
+      this._buildExpenseChart();
+    }, 50);
+  },
+
+  // ── Income Forecast logic ─────────────────────────────────────────────────
+  _buildForecastChart() {
+    const ctx = document.getElementById('forecast-chart');
+    if (!ctx) return;
+    if (this._forecastChart) { this._forecastChart.destroy(); this._forecastChart = null; }
+
+    const now    = new Date();
+    const months = 12;
+    const labels = [], forecastData = [], actualData = [];
+
+    // Dedup: allocations already linked to an auto-transaction
+    const allocsWithTx = new Set(
+      this.transactions
+        .map(t => { const m = (t.description || '').match(/\[alloc:([^\]]+)\]/); return m ? m[1] : null; })
+        .filter(Boolean)
+    );
+
+    // ── Active allocations (price > 0) ────────────────────────────────────────
+    const activeAllocs = this.allocations.filter(
+      a => a.status === 'active' && Number(a.price_paid) > 0 && a.start_date && a.end_date
+    );
+
+    // ── Build per-student renewal schedule ───────────────────────────────────
+    // For each allocation compute:
+    //   • durMonths = number of calendar months from start_date to end_date
+    //   • renewalMonths = the future months (within our 12-month window)
+    //     where a renewal payment is expected, i.e. the months that are
+    //     multiples of durMonths from start_date onward.
+    //
+    // Example – 3-month package starting 2026-02-01 ending 2026-04-30 ($300):
+    //   renewal occurs on Feb, May, Aug, Nov → full $300 shown in each of those months.
+    //
+    // Example – 1-month package starting 2026-03-01 ($80):
+    //   renewal every month → $80 shown in every month.
+
+    const allStudentContribs = []; // { studentName, packageName, price, durMonths, renewalMonths[] }
+
+    activeAllocs.forEach(a => {
+      const price = Number(a.price_paid);
+
+      // Parse start / end as local dates (avoid UTC midnight shift)
+      const [sy, sm, sd] = a.start_date.split('-').map(Number);
+      const [ey, em]     = a.end_date.split('-').map(Number);
+
+      // Duration in whole calendar months (minimum 1)
+      const durMonths = Math.max(1, (ey - sy) * 12 + (em - sm));
+
+      // Find first renewal month (= month after end_date month, i.e. start + durMonths)
+      // Then keep stepping +durMonths until we exceed the 12-month window.
+      const windowEnd = new Date(now.getFullYear(), now.getMonth() + months, 1);
+
+      // First renewal: same calendar day as start_date, durMonths later
+      let renewYear  = sy + Math.floor((sm - 1 + durMonths) / 12);
+      let renewMonth = ((sm - 1 + durMonths) % 12); // 0-based month
+
+      const renewalMonths = []; // indices into our 0..11 forecast window
+
+      // Also count the CURRENT active period: if start_date falls inside the window,
+      // it represents the payment already collected / due for the current cycle.
+      // We include the start month itself as the first "collection" point.
+      const startForecastIdx = (sy - now.getFullYear()) * 12 + (sm - 1 - now.getMonth());
+      if (startForecastIdx >= 0 && startForecastIdx < months) {
+        renewalMonths.push(startForecastIdx);
+      }
+
+      // Future renewals
+      while (true) {
+        const rDate = new Date(renewYear, renewMonth, 1);
+        if (rDate >= windowEnd) break;
+        const idx = (renewYear - now.getFullYear()) * 12 + (renewMonth - now.getMonth());
+        if (idx >= 0 && idx < months) {
+          renewalMonths.push(idx);
+        }
+        // Advance by durMonths
+        const nextTotal = renewMonth + durMonths;
+        renewYear  = renewYear + Math.floor(nextTotal / 12);
+        renewMonth = nextTotal % 12;
+      }
+
+      allStudentContribs.push({
+        studentName  : a.student?.full_name || 'Unknown',
+        packageName  : a.package?.name || '',
+        price,
+        durMonths,
+        renewalMonths,
+      });
+    });
+
+    // ── Build forecastData array ──────────────────────────────────────────────
+    for (let i = 0; i < months; i++) forecastData.push(0);
+
+    allStudentContribs.forEach(c => {
+      c.renewalMonths.forEach(idx => {
+        forecastData[idx] = Math.round((forecastData[idx] + c.price) * 100) / 100;
+      });
+    });
+
+    // ── Build actualData (recorded income, past + current month) ─────────────
+    for (let i = 0; i < months; i++) {
+      const d    = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+      const s    = Utils.localDateISO(d);
+      const e    = Utils.localDateISO(mEnd);
+      labels.push(d.toLocaleString('default', { month: 'short', year: '2-digit' }));
+
+      const txInc = this.transactions
+        .filter(t => t.type === 'income' && (t.date || '') >= s && (t.date || '') <= e)
+        .reduce((sum, t) => sum + Number(t.amount), 0);
+      const orphInc = this.allocations
+        .filter(a => Number(a.price_paid) > 0 && !allocsWithTx.has(a.id)
+          && (a.start_date || '') >= s && (a.start_date || '') <= e)
+        .reduce((sum, a) => sum + Number(a.price_paid), 0);
+      actualData.push(Math.round((txInc + orphInc) * 100) / 100);
+    }
+
+    // ── Chart ─────────────────────────────────────────────────────────────────
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gc     = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+    const tc     = isDark ? '#9ba8c4' : '#6b7280';
+    const thresh = this._forecastThreshold || 0;
+
+    this._forecastChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Projected Collections ($)',
+            data: forecastData,
+            backgroundColor: forecastData.map(v => v >= thresh
+              ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.65)'),
+            borderRadius: 6,
+            order: 2,
+          },
+          {
+            label: 'Actual Recorded ($)',
+            data: actualData,
+            type: 'line',
+            borderColor: '#6366f1',
+            backgroundColor: 'rgba(99,102,241,0.10)',
+            borderWidth: 2,
+            pointRadius: 4,
+            fill: false,
+            tension: 0.3,
+            order: 1,
+          },
+          {
+            label: `Target: $${thresh}`,
+            data: Array(months).fill(thresh),
+            type: 'line',
+            borderColor: '#ef4444',
+            borderWidth: 2,
+            borderDash: [6, 4],
+            pointRadius: 0,
+            fill: false,
+            order: 0,
+          },
+        ],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: tc, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx2 => {
+                const v = ctx2.parsed.y;
+                return ` ${ctx2.dataset.label.split('(')[0].trim()}: $${v.toFixed(2)}`;
+              },
+              afterBody: (items) => {
+                if (items[0]?.datasetIndex === 0) {
+                  const v    = items[0].parsed.y;
+                  const diff = v - thresh;
+                  // List which students pay this month
+                  const monthIdx = items[0].dataIndex;
+                  const payers   = allStudentContribs
+                    .filter(c => c.renewalMonths.includes(monthIdx))
+                    .map(c => `  • ${c.studentName} (${c.packageName}): $${c.price.toFixed(0)}`);
+                  const targetLine = diff >= 0
+                    ? [`✅ $${diff.toFixed(0)} above target`]
+                    : [`⚠️ $${Math.abs(diff).toFixed(0)} below target`];
+                  return [...targetLine, ...payers];
+                }
+              },
+            },
+          },
+        },
+        scales: {
+          x: { grid: { color: gc }, ticks: { color: tc } },
+          y: { grid: { color: gc }, ticks: { color: tc, callback: v => '$' + v } },
+        },
+      },
+    });
+
+    // ── Summary ───────────────────────────────────────────────────────────────
+    const summaryEl = document.getElementById('forecast-summary');
+    if (summaryEl) {
+      const aboveTarget  = forecastData.filter(v => v >= thresh).length;
+      const avgMonthly   = forecastData.reduce((a, b) => a + b, 0) / months;
+      const peakVal      = Math.max(...forecastData);
+      const peakIdx      = forecastData.indexOf(peakVal);
+      const gap          = avgMonthly - thresh;
+
+      const chips = [
+        { label: 'Avg projected / month', val: Utils.formatCurrency(avgMonthly), color: '#22c55e' },
+        { label: 'vs target (avg)', val: (gap >= 0 ? '+' : '') + Utils.formatCurrency(gap),
+          color: gap >= 0 ? '#22c55e' : '#ef4444' },
+        { label: 'Months above target', val: `${aboveTarget} / ${months}`,
+          color: aboveTarget === months ? '#22c55e' : aboveTarget >= months / 2 ? '#f59e0b' : '#ef4444' },
+        { label: 'Peak month', val: `${labels[peakIdx] || '—'} (${Utils.formatCurrency(peakVal)})`, color: '#6366f1' },
+        { label: 'Active students', val: allStudentContribs.length, color: '#0ea5e9' },
+      ].map(c => `
+        <div style="display:inline-flex;align-items:center;gap:8px;padding:6px 14px;
+          border-radius:99px;border:1px solid ${c.color}33;background:${c.color}11">
+          <span style="font-weight:700;color:${c.color}">${c.val}</span>
+          <span style="font-size:var(--font-size-xs);color:var(--text-muted)">${c.label}</span>
+        </div>
+      `).join('');
+
+      // Per-student renewal schedule
+      const rows = allStudentContribs
+        .sort((a, b) => b.price - a.price)
+        .map(r => {
+          const renewLabels = r.renewalMonths.map(idx => labels[idx] || '').filter(Boolean).join(', ');
+          return `
+            <div style="display:flex;align-items:center;justify-content:space-between;
+              padding:6px 10px;border-radius:var(--radius-sm);margin-bottom:3px;
+              background:var(--bg-tertiary);font-size:var(--font-size-xs)">
+              <div style="display:flex;align-items:center;gap:8px;min-width:0;flex:1">
+                <div style="width:6px;height:6px;border-radius:50%;background:#22c55e;flex-shrink:0"></div>
+                <span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Utils.esc(r.studentName)}</span>
+                <span style="color:var(--text-muted);flex-shrink:0">${Utils.esc(r.packageName)}</span>
+                <span style="color:var(--text-muted);flex-shrink:0">${r.durMonths}mo pkg</span>
+              </div>
+              <div style="text-align:right;flex-shrink:0;margin-left:12px">
+                <div style="font-weight:700;color:var(--brand-primary)">${Utils.formatCurrency(r.price)} / ${r.durMonths}mo</div>
+                <div style="color:var(--text-muted);font-size:10px">Collects: ${renewLabels || '—'}</div>
+              </div>
+            </div>
+          `;
+        }).join('');
+
+      summaryEl.innerHTML = `
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">${chips}</div>
+        ${allStudentContribs.length ? `
+          <button onclick="
+            const p=document.getElementById('forecast-schedule-panel');
+            const ic=document.getElementById('forecast-schedule-icon');
+            const open=p.style.display==='none';
+            p.style.display=open?'block':'none';
+            ic.className=open?'fas fa-chevron-up':'fas fa-chevron-down';
+            this.style.borderBottomLeftRadius=open?'0':'var(--radius-sm)';
+            this.style.borderBottomRightRadius=open?'0':'var(--radius-sm)';"
+            style="display:flex;align-items:center;gap:8px;padding:7px 14px;
+              border-radius:var(--radius-sm);border:1px solid var(--border-color);
+              background:var(--bg-secondary);cursor:pointer;font-size:var(--font-size-xs);
+              font-weight:600;color:var(--text-primary);width:100%;text-align:left;
+              transition:.15s" type="button">
+            <i class="fas fa-users" style="color:var(--brand-primary)"></i>
+            Per-student collection schedule
+            <span style="color:var(--text-muted);font-weight:400;margin-left:2px">(${allStudentContribs.length} student${allStudentContribs.length > 1 ? 's' : ''})</span>
+            <i id="forecast-schedule-icon" class="fas fa-chevron-down" style="margin-left:auto;color:var(--text-muted)"></i>
+          </button>
+          <div id="forecast-schedule-panel" style="display:none;border:1px solid var(--border-color);
+            border-top:none;border-radius:0 0 var(--radius-sm) var(--radius-sm);
+            background:var(--bg-secondary);padding:8px;max-height:320px;overflow-y:auto">
+            ${rows}
+          </div>
+        ` : '<p style="font-size:var(--font-size-sm);color:var(--text-muted)">No active allocations found.</p>'}
+      `;
+    }
+  },
+
+  // ── Monthly Expenses chart ────────────────────────────────────────────────
+  _buildExpenseChart() {
+    const ctx = document.getElementById('expense-chart');
+    if (!ctx) return;
+    if (this._expenseChart) { this._expenseChart.destroy(); this._expenseChart = null; }
+
+    const now = new Date();
+    const labels = [], expData = [], categories = {};
+
+    for (let i = 11; i >= 0; i--) {
+      const d    = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+      const s    = Utils.localDateISO(d);
+      const e    = Utils.localDateISO(mEnd);
+      labels.push(d.toLocaleString('default', { month: 'short', year: '2-digit' }));
+
+      const monthExp = this.transactions
+        .filter(t => t.type === 'expense' && (t.date || '') >= s && (t.date || '') <= e);
+      expData.push(monthExp.reduce((sum, t) => sum + Number(t.amount), 0));
+
+      // Aggregate categories
+      monthExp.forEach(t => {
+        const cat = t.category || 'General';
+        categories[cat] = (categories[cat] || 0) + Number(t.amount);
+      });
+    }
+
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gc = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+    const tc = isDark ? '#9ba8c4' : '#6b7280';
+    const avg = expData.reduce((a, b) => a + b, 0) / expData.filter(v => v > 0).length || 0;
+
+    this._expenseChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Expenses ($)',
+          data: expData,
+          backgroundColor: expData.map(v => v > avg * 1.3
+            ? 'rgba(239,68,68,0.80)'
+            : v > 0 ? 'rgba(245,158,11,0.75)' : 'rgba(156,163,175,0.35)'),
+          borderRadius: 6,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: c => ` $${c.parsed.y.toFixed(2)}` } },
+        },
+        scales: {
+          x: { grid: { color: gc }, ticks: { color: tc } },
+          y: { grid: { color: gc }, ticks: { color: tc, callback: v => '$' + v } },
+        },
+      },
+    });
+
+    // Top-category summary
+    const summaryEl = document.getElementById('expense-summary');
+    if (summaryEl) {
+      const total = expData.reduce((a, b) => a + b, 0);
+      const sorted = Object.entries(categories).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      const colors = ['#ef4444','#f59e0b','#6366f1','#8b5cf6','#22c55e'];
+      summaryEl.innerHTML = sorted.map(([cat, amt], i) => `
+        <div style="display:inline-flex;align-items:center;gap:8px;padding:6px 14px;
+          border-radius:99px;border:1px solid ${colors[i]}33;background:${colors[i]}11">
+          <span style="font-weight:700;color:${colors[i]}">${Utils.formatCurrency(amt)}</span>
+          <span style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(cat)}</span>
+          <span style="font-size:10px;color:${colors[i]};opacity:.7">${total > 0 ? Math.round(amt/total*100) : 0}%</span>
+        </div>
+      `).join('');
+    }
+  },
+
+  renderDuePackages(filter) {
     const soon = new Date();
     soon.setDate(soon.getDate() + 14);
-    const soonStr = soon.toISOString().slice(0, 10);
-    const due = this.allocations.filter(a => a.status === 'active' && a.end_date <= soonStr);
-    if (!due.length) return '<div class="empty-state"><i class="fas fa-check-circle"></i><p>No packages due soon</p></div>';
+    const soonStr = Utils.localDateISO(soon);
+    let due = this.allocations.filter(a => a.status === 'active' && a.end_date <= soonStr);
+
+    // Apply optional name filter
+    const q = (filter !== undefined ? filter : document.getElementById('due-pkg-search')?.value || '').toLowerCase().trim();
+    if (q) due = due.filter(a => (a.student?.full_name || '').toLowerCase().includes(q));
+
+    if (!due.length) {
+      return q
+        ? `<div class="empty-state"><i class="fas fa-search"></i><p>No results for "<strong>${Utils.esc(q)}</strong>"</p></div>`
+        : '<div class="empty-state"><i class="fas fa-check-circle"></i><p>No packages due soon</p></div>';
+    }
+
     return due.map(a => {
       const daysLeft = Math.ceil((new Date(a.end_date) - new Date()) / 86400000);
       const urgency  = daysLeft <= 0 ? 'badge-red' : daysLeft <= 3 ? 'badge-red' : daysLeft <= 7 ? 'badge-yellow' : 'badge-blue';
       const label    = daysLeft <= 0 ? 'Expired' : `${daysLeft}d left`;
       return `
-        <div class="due-item" onclick="FinancialsPage.openEditAllocation('${a.id}')"
+        <div class="due-item due-pkg-row"
+          data-student="${(a.student?.full_name || '').toLowerCase()}"
+          onclick="FinancialsPage.openEditAllocation('${a.id}')"
           style="cursor:pointer;transition:.15s;border-radius:var(--radius-md);padding:10px 12px;
-            margin-bottom:4px;border:1px solid transparent"
+            margin-bottom:4px;border:1px solid transparent;display:flex;align-items:center;justify-content:space-between"
           onmouseover="this.style.background='var(--bg-tertiary)';this.style.borderColor='var(--brand-primary)44'"
           onmouseout="this.style.background='';this.style.borderColor='transparent'">
           <div style="display:flex;align-items:center;gap:8px;min-width:0">
@@ -222,7 +652,7 @@ const FinancialsPage = {
             <div class="badge ${urgency}">${label}</div>
             <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">${Utils.formatDate(a.end_date)}</div>
             <div style="font-size:10px;color:var(--brand-primary);margin-top:2px;font-weight:500">
-              <i class="fas fa-edit" style="font-size:9px"></i> Click to renew
+              <i class="fas fa-redo" style="font-size:9px"></i> Click to renew
             </div>
           </div>
         </div>
@@ -230,23 +660,37 @@ const FinancialsPage = {
     }).join('');
   },
 
+  filterDuePackages(q) {
+    const list = document.getElementById('due-packages-list');
+    if (!list) return;
+    list.innerHTML = this.renderDuePackages(q);
+  },
+
   renderFinChart() {
     const ctx = document.getElementById('fin-chart');
     if (!ctx) return;
     if (this.chart) { this.chart.destroy(); this.chart = null; }
 
-    const months = [], incomeData = [], allocData = [], expenseData = [];
+    // ── Dedup: allocations already covered by a linked auto-transaction ──
+    const allocsWithTx = new Set(
+      this.transactions
+        .map(t => { const m = (t.description || '').match(/\[alloc:([^\]]+)\]/); return m ? m[1] : null; })
+        .filter(Boolean)
+    );
+    const orphanAllocs = this.allocations.filter(a => a.price_paid > 0 && !allocsWithTx.has(a.id));
+
+    const months = [], txIncomeData = [], orphanAllocData = [], expenseData = [];
     const now = new Date();
     for (let i = 5; i >= 0; i--) {
       const d    = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-      const s    = d.toISOString().slice(0, 10);
-      const e    = mEnd.toISOString().slice(0, 10);
+      const s    = Utils.localDateISO(d);
+      const e    = Utils.localDateISO(mEnd);
       months.push(d.toLocaleString('default', { month: 'short', year: '2-digit' }));
-      // Transactions income
-      incomeData.push(this.transactions.filter(t => t.type==='income'  && t.date >= s && t.date <= e).reduce((a, t) => a + Number(t.amount), 0));
-      // Allocation (subscription) income — use start_date as payment date
-      allocData.push(this.allocations.filter(a => a.price_paid > 0 && a.start_date >= s && a.start_date <= e).reduce((a, al) => a + Number(al.price_paid || 0), 0));
+      // Transaction income (already includes auto-generated subscription transactions)
+      txIncomeData.push(this.transactions.filter(t => t.type==='income' && t.date >= s && t.date <= e).reduce((a, t) => a + Number(t.amount), 0));
+      // Only add orphan allocations (no linked transaction) to avoid double-counting
+      orphanAllocData.push(orphanAllocs.filter(a => a.start_date >= s && a.start_date <= e).reduce((a, al) => a + Number(al.price_paid || 0), 0));
       expenseData.push(this.transactions.filter(t => t.type==='expense' && t.date >= s && t.date <= e).reduce((a, t) => a + Number(t.amount), 0));
     }
 
@@ -254,15 +698,12 @@ const FinancialsPage = {
     const gc = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
     const tc = isDark ? '#9ba8c4' : '#6b7280';
 
-    // Combine tx income + allocation income into a single "Total Income" series
-    const totalIncomeData = incomeData.map((v, i) => v + allocData[i]);
-
     this.chart = new Chart(ctx, {
       type: 'bar',
       data: { labels: months, datasets: [
-        { label: 'Subscriptions', data: allocData,       backgroundColor: 'rgba(99,102,241,0.70)', borderRadius: 5, stack: 'income' },
-        { label: 'Other Income',  data: incomeData,      backgroundColor: 'rgba(34,197,94,0.75)',  borderRadius: 5, stack: 'income' },
-        { label: 'Expenses',      data: expenseData,     backgroundColor: 'rgba(239,68,68,0.65)',  borderRadius: 5, stack: 'expense' },
+        { label: 'Income',        data: txIncomeData,     backgroundColor: 'rgba(34,197,94,0.75)',  borderRadius: 5, stack: 'income' },
+        { label: 'Legacy Subs',   data: orphanAllocData,  backgroundColor: 'rgba(99,102,241,0.70)', borderRadius: 5, stack: 'income' },
+        { label: 'Expenses',      data: expenseData,      backgroundColor: 'rgba(239,68,68,0.65)',  borderRadius: 5, stack: 'expense' },
       ]},
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -399,7 +840,7 @@ const FinancialsPage = {
           <input type="text" id="alloc-search" placeholder="Search student or package…"
             oninput="FinancialsPage.filterAllocations(this.value)" />
         </div>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
           <select class="filter-select" id="alloc-status-filter"
             onchange="FinancialsPage.filterAllocations()">
             <option value="">All Statuses</option>
@@ -407,6 +848,10 @@ const FinancialsPage = {
             <option value="expired">Expired</option>
             <option value="cancelled">Cancelled</option>
           </select>
+          <button class="btn btn-secondary" onclick="FinancialsPage.openStudentHistoryPicker()"
+            title="View full transaction & allocation history for a student">
+            <i class="fas fa-history"></i> Student History
+          </button>
           <button class="btn btn-primary" onclick="FinancialsPage.openAllocate()">
             <i class="fas fa-plus"></i> Allocate Package
           </button>
@@ -448,7 +893,9 @@ const FinancialsPage = {
               style="background:${a.student?.avatar_color || Utils.avatarColor(a.student?.full_name || '')};width:28px;height:28px;font-size:11px">
               ${Utils.initials(a.student?.full_name || '?')}
             </div>
-            <strong>${Utils.esc(a.student?.full_name || '—')}</strong>
+            <span style="font-weight:600;cursor:pointer;color:var(--brand-primary)"
+              onclick="FinancialsPage.openStudentHistory('${a.student_id || ''}','${Utils.esc(a.student?.full_name || 'Unknown')}')"
+              title="View history">${Utils.esc(a.student?.full_name || '—')}</span>
           </div>
         </td>
         <td>${Utils.esc(a.package?.name || '—')}</td>
@@ -459,9 +906,13 @@ const FinancialsPage = {
         <td>${Utils.statusBadge(a.status)}</td>
         <td>
           <div style="display:flex;gap:4px">
-            <button class="btn btn-ghost btn-icon btn-sm" title="Edit"
+            <button class="btn btn-ghost btn-icon btn-sm" title="View history"
+              onclick="FinancialsPage.openStudentHistory('${a.student_id || ''}','${Utils.esc(a.student?.full_name || 'Unknown')}')">
+              <i class="fas fa-history"></i>
+            </button>
+            <button class="btn btn-ghost btn-icon btn-sm" title="Renew / Edit"
               onclick="FinancialsPage.openEditAllocation('${a.id}')">
-              <i class="fas fa-edit"></i>
+              <i class="fas fa-redo"></i>
             </button>
             <button class="btn btn-danger btn-icon btn-sm" title="Delete"
               onclick="FinancialsPage.deleteAllocation('${a.id}')">
@@ -485,6 +936,204 @@ const FinancialsPage = {
       const matchStatus = !status || tr.dataset.allocStatus === status;
       tr.style.display = (matchSearch && matchStatus) ? '' : 'none';
     });
+  },
+
+  // ── Student History picker (no student pre-selected) ─────────────────────
+  async openStudentHistoryPicker() {
+    const { data: students } = await DB.getStudents();
+    const list = (students || []).filter(s => s.user_type === 'student');
+    const opts = list.map(s =>
+      `<option value="${s.id}" data-name="${Utils.esc(s.full_name)}">${Utils.esc(s.full_name)}</option>`
+    ).join('');
+    Modal.open('Student History', `
+      <div class="form-group">
+        <label class="form-label">Select Student</label>
+        <select id="hist-picker-sel" class="form-select">
+          <option value="">— Select Student —</option>
+          ${opts}
+        </select>
+      </div>
+      <div class="modal-footer" style="padding:0;border:none;margin-top:1rem">
+        <button class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
+        <button class="btn btn-primary" onclick="
+          const sel=document.getElementById('hist-picker-sel');
+          if(!sel.value){return;}
+          const name=sel.options[sel.selectedIndex].dataset.name;
+          Modal.close();
+          FinancialsPage.openStudentHistory(sel.value,name);">
+          <i class='fas fa-history'></i> View History
+        </button>
+      </div>
+    `, { size: 'sm' });
+  },
+
+  // ── Full history modal for one student ───────────────────────────────────
+  async openStudentHistory(studentId, studentName) {
+    if (!studentId) return Toast.error('Student not found');
+    Modal.open(
+      `<i class="fas fa-history" style="margin-right:6px;color:var(--brand-primary)"></i>History — ${Utils.esc(studentName)}`,
+      `<div style="padding:12px 0">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+          <div class="search-input-wrap" style="flex:1;min-width:160px">
+            <i class="fas fa-calendar"></i>
+            <input type="date" id="hist-from" value="${Utils.monthRange().start}"
+              oninput="FinancialsPage._renderHistoryContent('${studentId}')"
+              style="padding-left:32px" />
+          </div>
+          <span style="color:var(--text-muted);font-size:var(--font-size-sm)">to</span>
+          <div class="search-input-wrap" style="flex:1;min-width:160px">
+            <i class="fas fa-calendar"></i>
+            <input type="date" id="hist-to" value="${Utils.todayISO()}"
+              oninput="FinancialsPage._renderHistoryContent('${studentId}')"
+              style="padding-left:32px" />
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="
+            document.getElementById('hist-from').value='';
+            document.getElementById('hist-to').value='';
+            FinancialsPage._renderHistoryContent('${studentId}')">
+            <i class='fas fa-times'></i> Clear
+          </button>
+        </div>
+        <div id="hist-content"><div class="page-loading"><i class="fas fa-spinner fa-spin"></i></div></div>
+      </div>`,
+      { size: 'xl' }
+    );
+    // Give the modal time to render
+    await new Promise(r => setTimeout(r, 80));
+    this._renderHistoryContent(studentId);
+  },
+
+  async _renderHistoryContent(studentId) {
+    const el   = document.getElementById('hist-content');
+    if (!el) return;
+    const from = document.getElementById('hist-from')?.value || '';
+    const to   = document.getElementById('hist-to')?.value   || '';
+
+    // ── Filter allocations for this student ──────────────────────────────
+    const allocs = this.allocations.filter(a => {
+      if (a.student_id !== studentId) return false;
+      if (from && (a.start_date || '') < from) return false;
+      if (to   && (a.start_date || '') > to)   return false;
+      return true;
+    }).sort((a, b) => (b.start_date || '').localeCompare(a.start_date || ''));
+
+    // ── Filter transactions for this student ─────────────────────────────
+    // Transactions can reference the student by user_entity (name) or by [alloc:id] tag
+    const studentAllocIds = this.allocations
+      .filter(a => a.student_id === studentId)
+      .map(a => a.id);
+
+    const studentName = (this.allocations.find(a => a.student_id === studentId)?.student?.full_name || '').toLowerCase();
+
+    const txs = this.transactions.filter(t => {
+      const desc = (t.description || '').toLowerCase();
+      const entity = (t.user_entity || '').toLowerCase();
+      // Match by name OR by any alloc tag belonging to this student
+      const matchName  = studentName && entity.includes(studentName);
+      const matchAlloc = studentAllocIds.some(aid => desc.includes(`[alloc:${aid}]`));
+      if (!matchName && !matchAlloc) return false;
+      if (from && (t.date || '') < from) return false;
+      if (to   && (t.date || '') > to)   return false;
+      return true;
+    }).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+
+    // ── Summary ──────────────────────────────────────────────────────────
+    const totalPaid     = allocs.reduce((s, a) => s + Number(a.price_paid || 0), 0);
+    const totalTxIncome = txs.filter(t => t.type === 'income').reduce((s, t) => s + Number(t.amount || 0), 0);
+    const totalTxExp    = txs.filter(t => t.type === 'expense').reduce((s, t) => s + Number(t.amount || 0), 0);
+
+    const rangeLabel = from || to
+      ? `${from ? Utils.formatDate(from) : '…'} → ${to ? Utils.formatDate(to) : '…'}`
+      : 'All time';
+
+    // ── Allocations table ────────────────────────────────────────────────
+    const allocRows = allocs.length ? allocs.map(a => `
+      <tr>
+        <td style="white-space:nowrap">${Utils.formatDate(a.start_date)}</td>
+        <td style="white-space:nowrap">${Utils.formatDate(a.end_date)}</td>
+        <td>${Utils.esc(a.package?.name || '—')}</td>
+        <td>${a.discount_pct > 0 ? `<span class="badge badge-yellow">${a.discount_pct}%</span>` : '—'}</td>
+        <td style="font-weight:600;color:var(--brand-primary)">${a.price_paid != null ? Utils.formatCurrency(a.price_paid) : '—'}</td>
+        <td>${Utils.statusBadge(a.status)}</td>
+        <td style="font-size:11px;color:var(--text-muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${Utils.esc(a.notes || '—')}</td>
+      </tr>
+    `).join('') : `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:18px">No allocations found for this period.</td></tr>`;
+
+    // ── Transactions table ───────────────────────────────────────────────
+    const txRows = txs.length ? txs.map(t => {
+      const isIncome = t.type === 'income';
+      return `
+        <tr>
+          <td style="white-space:nowrap">${Utils.formatDate(t.date)}</td>
+          <td>
+            <span class="badge ${isIncome ? 'badge-green' : 'badge-red'}" style="text-transform:capitalize">
+              ${isIncome ? '▲' : '▼'} ${t.type}
+            </span>
+          </td>
+          <td style="font-weight:600;color:${isIncome ? 'var(--brand-success)' : 'var(--brand-danger)'}">
+            ${isIncome ? '+' : '-'}${Utils.formatCurrency(t.amount)}
+          </td>
+          <td>${Utils.esc(t.category || '—')}</td>
+          <td>${Utils.esc(t.method || '—')}</td>
+          <td>${Utils.statusBadge(t.status)}</td>
+          <td style="font-size:11px;color:var(--text-muted);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${Utils.esc(t.description || '')}">${Utils.esc(t.description || '—')}</td>
+        </tr>
+      `;
+    }).join('') : `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:18px">No transactions found for this period.</td></tr>`;
+
+    el.innerHTML = `
+      <!-- Summary chips -->
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+        ${[
+          { label: 'Period', val: rangeLabel,                    color: '#6366f1' },
+          { label: 'Packages paid', val: Utils.formatCurrency(totalPaid), color: '#22c55e' },
+          { label: 'Tx income',     val: Utils.formatCurrency(totalTxIncome), color: '#0ea5e9' },
+          { label: 'Tx expense',    val: Utils.formatCurrency(totalTxExp),    color: '#ef4444' },
+          { label: 'Allocation cycles', val: allocs.length,      color: '#8b5cf6' },
+        ].map(c => `
+          <div style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;
+            border-radius:99px;border:1px solid ${c.color}33;background:${c.color}11">
+            <span style="font-weight:700;color:${c.color}">${c.val}</span>
+            <span style="font-size:11px;color:var(--text-muted)">${c.label}</span>
+          </div>
+        `).join('')}
+      </div>
+
+      <!-- Allocations / Package History -->
+      <div style="font-size:var(--font-size-xs);font-weight:700;text-transform:uppercase;
+        letter-spacing:.05em;color:var(--text-muted);margin-bottom:6px">
+        <i class="fas fa-box" style="margin-right:4px"></i> Package Allocations (${allocs.length})
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;margin-bottom:1rem">
+        <div class="table-wrap">
+          <table class="table" style="font-size:var(--font-size-xs)">
+            <thead><tr>
+              <th>Start</th><th>End</th><th>Package</th>
+              <th>Discount</th><th>Paid</th><th>Status</th><th>Notes</th>
+            </tr></thead>
+            <tbody>${allocRows}</tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Transactions -->
+      <div style="font-size:var(--font-size-xs);font-weight:700;text-transform:uppercase;
+        letter-spacing:.05em;color:var(--text-muted);margin-bottom:6px">
+        <i class="fas fa-exchange-alt" style="margin-right:4px"></i> Transactions (${txs.length})
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="table-wrap">
+          <table class="table" style="font-size:var(--font-size-xs)">
+            <thead><tr>
+              <th>Date</th><th>Type</th><th>Amount</th>
+              <th>Category</th><th>Method</th><th>Status</th><th>Description</th>
+            </tr></thead>
+            <tbody>${txRows}</tbody>
+          </table>
+        </div>
+      </div>
+    `;
   },
 
   // ─── Allocation form (shared create + edit) ──────────────────────────────
@@ -662,7 +1311,7 @@ const FinancialsPage = {
     d.setMonth(d.getMonth() + this._allocMonths);
     // End date = same day next period (e.g. 25-Mar → 25-Apr)
     const endEl = document.getElementById('alloc-end');
-    if (endEl) endEl.value = d.toISOString().slice(0, 10);
+    if (endEl) endEl.value = Utils.localDateISO(d);
   },
 
   calcFinalPrice() {
@@ -709,83 +1358,67 @@ const FinancialsPage = {
     if (!data.notes)     data.notes = null;
 
     const isNew = !id;
-    if (isNew) data.status = 'active';
+    data.status = 'active';   // always active for a new/renewed allocation
 
     try {
-      const result = id ? await DB.updateAllocation(id, data) : await DB.createAllocation(data);
-      if (result.error) throw result.error;
+      // ── RENEWAL (edit) → expire the old allocation, insert a fresh one ────
+      // We NEVER update an existing allocation row; each payment cycle is its
+      // own immutable record so the full history is preserved.
+      let allocId = null;
 
-      // ── Resolve student + package for both new and renewal ──────────────
-      const allocId  = id || result.data?.[0]?.id || result.data?.id || null;
-      const studentId = data.student_id || (id ? this.allocations.find(a => a.id === id)?.student_id : null);
-      const student  = this._allocStudents.find(s => s.id === studentId)
-                    || this.allocations.find(a => a.id === id)?.student;
-      const pkg      = this.packages.find(p => p.id === data.package_id)
-                    || this.allocations.find(a => a.id === id)?.package;
+      if (!isNew) {
+        // 1) Mark the old allocation as expired
+        const prevAlloc = this.allocations.find(a => a.id === id);
+        await DB.updateAllocation(id, { status: 'expired' })
+          .catch(err => console.warn('Could not expire old allocation:', err));
+
+        // Carry forward student_id from previous record if the form didn't send it
+        if (!data.student_id && prevAlloc?.student_id) {
+          data.student_id = prevAlloc.student_id;
+        }
+        if (!data.package_id && prevAlloc?.package_id) {
+          data.package_id = prevAlloc.package_id;
+        }
+      }
+
+      // 2) Create a new allocation row (both for new and renewal)
+      const result = await DB.createAllocation(data);
+      if (result.error) throw result.error;
+      allocId = result.data?.id || result.data?.[0]?.id || null;
+
+      // ── Resolve student + package ────────────────────────────────────────
+      const studentId = data.student_id
+        || (!isNew ? this.allocations.find(a => a.id === id)?.student_id : null);
+      const student = this._allocStudents.find(s => s.id === studentId)
+                   || this.allocations.find(a => a.id === id)?.student;
+      const pkg     = this.packages.find(p => p.id === data.package_id)
+                   || this.allocations.find(a => a.id === id)?.package;
 
       // ── Auto-create income transaction ───────────────────────────────────
-      // Fires for NEW allocations with price, AND for RENEWALS (edit) with price
-      const isRenewal = !isNew && data.price_paid > 0;
-      if ((isNew || isRenewal) && data.price_paid > 0) {
-
-        // For renewals: update the existing linked transaction if found
-        if (isRenewal) {
-          const { data: txList } = await DB.getTransactions();
-          const linked = (txList || []).find(t =>
-            t.description && t.description.includes(`[alloc:${id}]`)
-          );
-          if (linked) {
-            // Update the existing transaction amount + date
-            await DB.updateTransaction(linked.id, {
-              amount: data.price_paid,
-              date:   data.start_date || Utils.todayISO(),
-              description: (pkg
-                ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
-                : 'Package renewal')
-                + ` [alloc:${id}]`,
-            }).catch(e => console.warn('Could not update linked transaction:', e));
-          } else {
-            // No linked transaction found — create a new one for this renewal
-            await DB.createTransaction({
-              type:        'income',
-              amount:      data.price_paid,
-              date:        data.start_date || Utils.todayISO(),
-              category:    'Subscription',
-              user_entity: student?.full_name || null,
-              description: (pkg
-                ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
-                : 'Package renewal')
-                + (allocId ? ` [alloc:${allocId}]` : ''),
-              method:      'cash',
-              status:      'completed',
-            }).catch(e => console.warn('Auto-transaction failed on renewal:', e));
-          }
-          Toast.success('Allocation renewed & transaction updated!');
+      // Always create a NEW transaction for the new allocation row
+      if (data.price_paid > 0) {
+        const txData = {
+          type:        'income',
+          amount:      data.price_paid,
+          date:        data.start_date || Utils.todayISO(),
+          category:    'Subscription',
+          user_entity: student?.full_name || null,
+          description: (pkg
+            ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% off)` : ''}`
+            : (isNew ? 'Package subscription' : 'Package renewal'))
+            + (allocId ? ` [alloc:${allocId}]` : ''),
+          method:      'cash',
+          status:      'completed',
+        };
+        const txResult = await DB.createTransaction(txData);
+        if (txResult.error) {
+          console.warn('Auto-transaction failed:', txResult.error);
+          Toast.warning('Allocation saved but auto-transaction could not be recorded.');
         } else {
-          // New allocation — create transaction
-          const txData = {
-            type:        'income',
-            amount:      data.price_paid,
-            date:        data.start_date || Utils.todayISO(),
-            category:    'Subscription',
-            user_entity: student?.full_name || null,
-            description: (pkg
-              ? `Package: ${pkg.name}${data.discount_pct > 0 ? ` (${data.discount_pct}% discount applied)` : ''}`
-              : 'Package subscription')
-              + (allocId ? ` [alloc:${allocId}]` : ''),
-            method:      'cash',
-            status:      'completed',
-          };
-          const txResult = await DB.createTransaction(txData);
-          if (txResult.error) {
-            console.warn('Auto-transaction failed:', txResult.error);
-            Toast.warning('Allocation saved but auto-transaction could not be recorded.');
-          } else {
-            Toast.success('Package allocated & income recorded!');
-          }
+          Toast.success(isNew ? 'Package allocated & income recorded!' : 'Renewal saved — new allocation & transaction created!');
         }
 
-        // ── Fire on_payment notification rule (new + renewal) ───────────────
+        // ── Fire on_payment notification rule ───────────────────────────────
         if (student) {
           NotificationsPage.triggerRule('on_payment', {
             student_id: student.id   || studentId,
@@ -798,9 +1431,8 @@ const FinancialsPage = {
             end_date:   data.end_date      || '',
           }).catch(err => console.warn('on_payment trigger failed:', err));
         }
-
       } else {
-        Toast.success(id ? 'Allocation updated!' : 'Package allocated!');
+        Toast.success(isNew ? 'Package allocated!' : 'Renewal saved!');
       }
 
       Modal.close();
@@ -887,8 +1519,7 @@ const FinancialsPage = {
   // ─────────────────────────────────────────────────────────────────────────
   renderTransactions(el) {
     // Default date range = first day of current month → today
-    const firstOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1)
-      .toISOString().slice(0, 10);
+    const firstOfMonth = Utils.localDateISO(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
     const today = Utils.todayISO();
 
     el.innerHTML = `
