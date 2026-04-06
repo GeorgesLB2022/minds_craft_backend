@@ -551,7 +551,8 @@ const SettingsPage = {
       updates.timezone = getVal('setting-timezone');
       updates.date_format = getVal('setting-date_format');
     } else if (section === 'branding') {
-      updates.logo_url = getVal('setting-logo_url') || null;
+      updates.logo_url    = getVal('setting-logo_url') || null;
+      updates.center_name = getVal('setting-center_name_brand') || null;
       updates.brand_color = getVal('setting-brand_color');
     } else if (section === 'security') {
       updates.two_fa_enabled = getCheck('setting-two_fa_enabled');
@@ -572,6 +573,9 @@ const SettingsPage = {
     if (error) return Toast.error(error.message || 'Failed to save');
     Toast.success('Settings saved!');
     this.settings = { ...this.settings, ...updates };
+
+    // Re-apply branding immediately (logo, name, color)
+    if (section === 'branding') App.applyBranding();
   },
 
   openCreateRole() {
