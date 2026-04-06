@@ -75,6 +75,7 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIs...';  // your anon key
 | `attendance` | Daily attendance per student per level |
 | `trainers` | Trainer profiles |
 | `trainer_assignments` | Trainer ↔ Level mapping |
+| `trainer_sessions` | Trainer attendance log per session (date, level, attended, cost) |
 | `events` | Center events & competitions |
 | `event_registrations` | User registrations for events |
 | `packages` | Subscription packages |
@@ -135,10 +136,17 @@ All tables have **Row Level Security (RLS)** — only authenticated users can re
   - Summary stats (present/late/absent) and attendance % bar per student
 - CSV export
 
-### Trainers
+### Trainers ⭐ Updated
 - Trainer CRUD (name, email, phone, session fee)
 - Level assignment: multi-select which levels a trainer teaches
-- Performance overview
+- **Attendance logging** (new): click **Attendance** on any trainer card to open the session log modal:
+  - Log sessions with date, level, attendance status, session count, optional fee override and notes
+  - Running totals: sessions attended, total cost, default fee
+  - Delete individual session entries
+- **Cost Forecast chart** (new): click **Cost Forecast** button in page header to open an XL modal with:
+  - Stacked bar chart: 6 past months (actual logged cost) + 6 future months (projected from avg sessions/month)
+  - Per-trainer color coding with legend
+  - Summary cards showing total paid per trainer
 
 ### Events
 - Event CRUD (title, dates, times, location, capacity, theme color)
@@ -146,6 +154,9 @@ All tables have **Row Level Security (RLS)** — only authenticated users can re
 - Status workflow: upcoming → active → completed / cancelled
 
 ### Financials ⭐ Updated
+- **Analytics tab** (new): two intelligent analysis charts:
+  - **Income Forecast** (12-month projection): projects expected monthly income from active package renewals + ongoing subscriptions; bar colored green (above target) / red (below target); purple line = actual recorded income; red dashed line = configurable threshold (default $900, editable inline)
+  - **Monthly Expenses** (last 12 months): bar chart with red highlighting for spike months; top-5 expense categories shown as chips below the chart
 - Transaction log (income & expense) with category, payment method, description, status
 - Package management (duration, base price, discount)
 - **Student package allocations:**
@@ -193,6 +204,32 @@ Email uses **EmailJS** with Gmail SMTP via an App Password (no OAuth, no domain 
 - Role management with permissions matrix
 - Security settings (2FA toggle, session timeout, password policy)
 - Supabase configuration change
+
+---
+
+## 🗃️ Required SQL Migration — Run in Supabase
+
+Run this once in **Supabase → SQL Editor** to create the `trainer_sessions` table:
+
+```sql
+-- Trainer Sessions table (attendance log per trainer per level)
+CREATE TABLE IF NOT EXISTS trainer_sessions (
+  id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  trainer_id    UUID NOT NULL REFERENCES trainers(id) ON DELETE CASCADE,
+  level_id      UUID NOT NULL REFERENCES levels(id) ON DELETE CASCADE,
+  session_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+  attended      BOOLEAN NOT NULL DEFAULT true,
+  sessions_count INT NOT NULL DEFAULT 1,
+  fee_override  NUMERIC(10,2) DEFAULT NULL,
+  notes         TEXT,
+  created_at    TIMESTAMPTZ DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE trainer_sessions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can do everything" ON trainer_sessions
+  FOR ALL USING (auth.role() = 'authenticated');
+```
 
 ---
 
