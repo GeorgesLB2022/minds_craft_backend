@@ -128,13 +128,19 @@ const UsersPage = {
 
     tbody.innerHTML = users.map(u => {
       const initials = Utils.initials(u.full_name);
-      const color = u.avatar_color || Utils.avatarColor(u.full_name);
+      const color    = u.avatar_color || Utils.avatarColor(u.full_name);
+      const avatarHTML = u.avatar_url
+        ? `<div class="users-table-avatar" style="background:transparent;padding:0;overflow:hidden">
+             <img src="${Utils.esc(u.avatar_url)}" alt="${Utils.esc(initials)}"
+               style="width:100%;height:100%;object-fit:cover;border-radius:50%" />
+           </div>`
+        : `<div class="users-table-avatar" style="background:${Utils.esc(color)}">${Utils.esc(initials)}</div>`;
       const parentInfo = u.user_type === 'student' && u.parent ? `<span class="text-xs text-muted">Parent: ${Utils.esc(u.parent.full_name)}</span>` : '';
       return `
         <tr>
           <td>
             <div class="users-table-info">
-              <div class="users-table-avatar" style="background:${Utils.esc(color)}">${Utils.esc(initials)}</div>
+              ${avatarHTML}
               <div>
                 <div class="users-table-name">${Utils.esc(u.full_name)}</div>
                 ${parentInfo}
@@ -178,8 +184,48 @@ const UsersPage = {
 
   userFormHTML(user, parents) {
     const isStudent = user?.user_type === 'student';
+    const avatarUrl = user?.avatar_url || '';
+    const color     = user?.avatar_color || Utils.avatarColor(user?.full_name || '');
+    const initials  = Utils.initials(user?.full_name || '');
     return `
       <form onsubmit="UsersPage.saveUser(event, ${user ? `'${user.id}'` : 'null'})">
+
+        <!-- ── Photo upload ── -->
+        <div class="form-group" style="margin-bottom:1.2rem">
+          <label class="form-label">Profile Photo <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+
+            <!-- Live avatar preview -->
+            <div id="user-avatar-preview"
+              style="width:72px;height:72px;border-radius:50%;overflow:hidden;flex-shrink:0;
+                border:2px solid var(--border-color);display:flex;align-items:center;
+                justify-content:center;font-size:22px;font-weight:700;color:#fff;
+                background:${avatarUrl ? 'transparent' : color}">
+              ${avatarUrl
+                ? `<img src="${Utils.esc(avatarUrl)}" style="width:100%;height:100%;object-fit:cover" />`
+                : initials || '<i class="fas fa-user"></i>'}
+            </div>
+
+            <div style="flex:1;min-width:180px">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+                <label class="btn btn-secondary btn-sm" style="cursor:pointer;margin:0">
+                  <i class="fas fa-upload"></i> Upload Photo
+                  <input type="file" id="user-photo-file" accept="image/*" style="display:none"
+                    onchange="UsersPage.handlePhotoFile(this)" />
+                </label>
+                <button type="button" class="btn btn-ghost btn-sm" onclick="UsersPage.clearPhoto()">
+                  <i class="fas fa-times"></i> Clear
+                </button>
+              </div>
+              <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">
+                PNG, JPG, WebP · max 2 MB · stored as Base64
+              </p>
+            </div>
+          </div>
+          <!-- Hidden field holding the photo data URL -->
+          <input type="hidden" id="user-avatar-url" name="avatar_url" value="${Utils.esc(avatarUrl)}" />
+        </div>
+
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Full Name *</label>
@@ -255,6 +301,39 @@ const UsersPage = {
     `;
   },
 
+  // ── Photo upload helpers ──────────────────────────────────────
+  handlePhotoFile(input) {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) return Toast.error('Photo too large — max 2 MB');
+    const reader = new FileReader();
+    reader.onload = e => {
+      const dataUrl = e.target.result;
+      // Update hidden field
+      const hidden = document.getElementById('user-avatar-url');
+      if (hidden) hidden.value = dataUrl;
+      // Update preview
+      const preview = document.getElementById('user-avatar-preview');
+      if (preview) {
+        preview.style.background = 'transparent';
+        preview.innerHTML = `<img src="${dataUrl}" style="width:100%;height:100%;object-fit:cover" />`;
+      }
+    };
+    reader.readAsDataURL(file);
+  },
+
+  clearPhoto() {
+    const hidden  = document.getElementById('user-avatar-url');
+    const preview = document.getElementById('user-avatar-preview');
+    const fileInput = document.getElementById('user-photo-file');
+    if (hidden)    hidden.value = '';
+    if (fileInput) fileInput.value = '';
+    if (preview) {
+      preview.style.background = 'var(--bg-tertiary)';
+      preview.innerHTML = '<i class="fas fa-user" style="color:var(--text-muted)"></i>';
+    }
+  },
+
   onRoleChange(select) {
     const fields = document.getElementById('student-fields');
     if (fields) {
@@ -272,6 +351,8 @@ const UsersPage = {
     Object.keys(data).forEach(k => { if (data[k] === '') data[k] = null; });
 
     data.avatar_color = Utils.avatarColor(data.full_name);
+    // avatar_url comes from the hidden field (base64 or URL); keep null if empty
+    if (!data.avatar_url) data.avatar_url = null;
 
     try {
       let result;
