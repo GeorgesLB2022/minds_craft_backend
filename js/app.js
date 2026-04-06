@@ -40,22 +40,6 @@ const App = {
   async boot() {
     initTheme();
 
-    // ── FAST-RESTORE: if Supabase already has a cached session in localStorage,
-    //    show the app immediately (no flicker) — handles sandbox reloads on
-    //    window/tab switch without waiting for the full auth round-trip.
-    //    We still verify the session async below and sign out if it's expired.
-    try {
-      const raw = Object.keys(localStorage).find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
-      if (raw) {
-        const cached = JSON.parse(localStorage.getItem(raw));
-        if (cached?.user && cached?.expires_at && cached.expires_at * 1000 > Date.now()) {
-          this.currentUser = cached.user;
-          this._fastRestored = true;
-          this.showApp();
-        }
-      }
-    } catch(e) { /* ignore parse errors */ }
-
     // ── Read hash FIRST before anything else ──
     const hash = window.location.hash;
     const hasToken = hash.includes('access_token');
@@ -108,6 +92,24 @@ const App = {
     }
 
     this.isSetup = true;
+
+    // ── FAST-RESTORE: DB is now initialised — safe to show the app immediately.
+    //    Reads the Supabase session token from localStorage (set by Supabase SDK).
+    //    This eliminates the blank-dashboard flicker on sandbox reloads AND on
+    //    first load when credentials are hardcoded, because DB is ready to query.
+    if (!hasToken) {
+      try {
+        const raw = Object.keys(localStorage).find(k => k.startsWith('sb-') && k.endsWith('-auth-token'));
+        if (raw) {
+          const cached = JSON.parse(localStorage.getItem(raw));
+          if (cached?.user && cached?.expires_at && cached.expires_at * 1000 > Date.now()) {
+            this.currentUser = cached.user;
+            this._fastRestored = true;
+            this.showApp(); // DB is ready now — dashboard queries will succeed
+          }
+        }
+      } catch(e) { /* ignore parse errors */ }
+    }
 
     // ── Show "Signing you in…" spinner if token is present ──
     if (hasToken) {
@@ -597,6 +599,9 @@ const App = {
       this.navigate(this.pages[hash] ? hash : 'dashboard');
     }
 
+    // ── Apply center branding (logo + name) from settings ──
+    this.applyBranding();
+
     // ── Run expiry check on every app load (silently) ──
     // Throttled to once per calendar day (local date, not UTC)
     const _d = new Date();
@@ -610,6 +615,40 @@ const App = {
         NotificationsPage.runExpiryCheck(true)
           .catch(e => console.warn('Expiry check error:', e));
       }, 3000);
+    }
+  },
+
+  // ─────────────────────────────────────────────
+  // BRANDING — apply logo + center name from settings to sidebar
+  // ─────────────────────────────────────────────
+  async applyBranding() {
+    try {
+      const settings = await DB.getSettings();
+      if (!settings) return;
+
+      const logoUrl   = settings.logo_url   || null;
+      const name      = settings.center_name || "Minds' Craft";
+      const brandColor = settings.brand_color || null;
+
+      // ── Sidebar logo ──
+      const sidebarImg  = document.getElementById('sidebar-logo-img');
+      const sidebarText = document.getElementById('sidebar-logo-text');
+      if (logoUrl) {
+        // Custom logo: show full-width image, hide text name
+        if (sidebarImg)  { sidebarImg.src = logoUrl; sidebarImg.style.display = 'block'; }
+        if (sidebarText)   sidebarText.style.display = 'none';
+      } else {
+        // No custom logo: show default SVG + center name text
+        if (sidebarImg)  { sidebarImg.src = 'assets/logo.svg'; sidebarImg.style.display = 'block'; }
+        if (sidebarText) { sidebarText.textContent = name; sidebarText.style.display = 'block'; }
+      }
+
+      // ── Brand color ──
+      if (brandColor) {
+        document.documentElement.style.setProperty('--brand-primary', brandColor);
+      }
+    } catch(e) {
+      // Non-fatal — branding is cosmetic
     }
   },
 
