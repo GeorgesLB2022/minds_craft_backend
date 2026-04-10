@@ -8,12 +8,14 @@ const AttendancePage = {
   currentTab: 'daily',
   records:    {},   // studentId → { id, status, checkin_time, notes, _saving, _saved, _error }
   levelId:    null,
+  slotFilter: null, // currently selected schedule slot key (e.g. "Monday 09:00-10:00")
   date:       null,
   students:   [],
 
   // Cached data loaded once on render
-  _allCourses: [],
-  _allLevels:  [],
+  _allCourses:    [],
+  _allLevels:     [],
+  _levelSchedules: {},  // levelId → [{id, day_of_week, start_time, end_time, label}]
 
   // Debounce timers for text fields  (studentId → timer)
   _saveTimers: {},
@@ -60,6 +62,8 @@ const AttendancePage = {
             <thead id="att-thead">
               <tr>
                 <th>Student</th>
+                <th>Slot</th>
+                <th>Package</th>
                 <th>Status</th>
                 <th>Check-in Time</th>
                 <th>Notes</th>
@@ -67,7 +71,7 @@ const AttendancePage = {
               </tr>
             </thead>
             <tbody id="att-tbody">
-              <tr><td colspan="5" class="text-center text-muted">
+              <tr><td colspan="7" class="text-center text-muted">
                 Select a date, course and level to load attendance.
               </td></tr>
             </tbody>
@@ -125,6 +129,15 @@ const AttendancePage = {
             </select>
           </div>
           <div class="form-group" style="margin:0;flex:1;min-width:160px">
+            <label class="form-label">
+              <i class="fas fa-clock" style="margin-right:3px;color:var(--brand-primary)"></i>
+              Schedule Slot
+            </label>
+            <select id="att-slot" class="form-select" onchange="AttendancePage.onSlotChange()">
+              <option value="">— All Students —</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0;flex:1;min-width:160px">
             <label class="form-label">Search Student</label>
             <div class="search-input-wrap">
               <i class="fas fa-search"></i>
@@ -177,21 +190,38 @@ const AttendancePage = {
   // LOAD ALL COURSES + LEVELS ONCE
   // ─────────────────────────────────────────────────────────────────────────
   async loadAllData() {
-    const [{ data: courses }, { data: levels }] = await Promise.all([
+    const [{ data: courses }, { data: levels }, { data: schedules }] = await Promise.all([
       DB.getCourses(),
       DB.getAll('levels', {
         select: 'id, name, course_id, day_of_week, start_time, end_time, status',
         order:  'order_num',
       }),
+      DB.getAll('level_schedules', {
+        select: 'id, level_id, day_of_week, start_time, end_time, label',
+        order:  'day_of_week',
+      }),
     ]);
-    this._allCourses = courses || [];
-    this._allLevels  = levels  || [];
+    this._allCourses    = courses   || [];
+    this._allLevels     = levels    || [];
+    // Index schedules by level_id for fast lookup
+    this._levelSchedules = {};
+    (schedules || []).forEach(s => {
+      if (!this._levelSchedules[s.level_id]) this._levelSchedules[s.level_id] = [];
+      this._levelSchedules[s.level_id].push(s);
+    });
 
     if (this.currentTab === 'daily') {
       this._populateCoursesByDate();
     } else {
       this._populateAllCourses();
     }
+  },
+
+  // Returns the canonical slot key string from a schedule object
+  _slotKey(s) {
+    if (!s?.day_of_week) return '';
+    const t = s.start_time ? ` ${s.start_time}${s.end_time ? '-' + s.end_time : ''}` : '';
+    return `${s.day_of_week}${t}`;
   },
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -261,33 +291,64 @@ const AttendancePage = {
 
   _populateLevelsForDay(courseId, weekday) {
     const levelSelect = document.getElementById('att-level');
+    const slotSelect  = document.getElementById('att-slot');
     if (!levelSelect) return;
-    const previousVal = levelSelect.value;
+    const previousLvl  = levelSelect.value;
     levelSelect.innerHTML = '<option value="">— Select Level —</option>';
+    if (slotSelect) slotSelect.innerHTML = '<option value="">— All Students —</option>';
 
-    const levels = this._allLevels.filter(l =>
-      l.course_id   === courseId &&
-      l.day_of_week === weekday
-    );
+    // Levels that have the weekday in their slots (or legacy day_of_week)
+    const levels = this._allLevels.filter(l => {
+      if (l.course_id !== courseId) return false;
+      const slots = this._levelSchedules[l.id] || [];
+      if (slots.length > 0) return slots.some(s => s.day_of_week === weekday);
+      return l.day_of_week === weekday;  // legacy fallback
+    });
 
     levels.forEach(lv => {
-      const opt   = document.createElement('option');
-      opt.value   = lv.id;
-      const time  = lv.start_time
-        ? ` (${lv.start_time}${lv.end_time ? '–' + lv.end_time : ''})`
-        : '';
+      const opt = document.createElement('option');
+      opt.value = lv.id;
+      // Show first matching slot time
+      const slots   = this._levelSchedules[lv.id] || [];
+      const daySlot = slots.find(s => s.day_of_week === weekday);
+      const time    = daySlot?.start_time
+        ? ` (${daySlot.start_time}${daySlot.end_time ? '–' + daySlot.end_time : ''})`
+        : lv.start_time ? ` (${lv.start_time}${lv.end_time ? '–' + lv.end_time : ''})` : '';
       opt.textContent = lv.name + time;
-      if (lv.id === previousVal) opt.selected = true;
+      if (lv.id === previousLvl) opt.selected = true;
       levelSelect.appendChild(opt);
     });
 
     if (levels.length === 1) {
       levelSelect.value = levels[0].id;
+      this._populateSlotsForLevel(levels[0].id, weekday);
       this.onFilterChange();
-    } else if (previousVal && levels.find(l => l.id === previousVal)) {
+    } else if (previousLvl && levels.find(l => l.id === previousLvl)) {
+      this._populateSlotsForLevel(previousLvl, weekday);
       this.onFilterChange();
     } else {
       this._clearTable();
+    }
+  },
+
+  _populateSlotsForLevel(levelId, weekday) {
+    const slotSelect = document.getElementById('att-slot');
+    if (!slotSelect) return;
+    slotSelect.innerHTML = '<option value="">— All Students —</option>';
+    const slots = (this._levelSchedules[levelId] || []).filter(s => !weekday || s.day_of_week === weekday);
+    slots.forEach(s => {
+      const key = this._slotKey(s);
+      const lbl = s.label ? `${s.label} — ${key}` : key;
+      const opt = document.createElement('option');
+      opt.value = key;
+      opt.textContent = lbl;
+      if (this.slotFilter === key) opt.selected = true;
+      slotSelect.appendChild(opt);
+    });
+    // If only one slot, auto-select it
+    if (slots.length === 1) {
+      slotSelect.value = this._slotKey(slots[0]);
+      this.slotFilter  = slotSelect.value;
     }
   },
 
@@ -298,7 +359,7 @@ const AttendancePage = {
 
   _clearTable() {
     const tbody = document.getElementById('att-tbody');
-    if (tbody) tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted">
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted">
       Select a date, course and level to load attendance.</td></tr>`;
     this.students = [];
     this.records  = {};
@@ -343,9 +404,18 @@ const AttendancePage = {
     const levelId = document.getElementById('att-level')?.value;
     const date    = document.getElementById('att-date')?.value;
     if (!levelId || !date) { this._clearTable(); return; }
-    this.levelId = levelId;
-    this.date    = date;
+    this.levelId    = levelId;
+    this.date       = date;
+    this.slotFilter = document.getElementById('att-slot')?.value || null;
+    // Populate slot dropdown for the selected level
+    const weekday = this._weekdayName(date);
+    this._populateSlotsForLevel(levelId, weekday);
     await this.loadDailyAttendance();
+  },
+
+  onSlotChange() {
+    this.slotFilter = document.getElementById('att-slot')?.value || null;
+    this.renderDailyTable();
   },
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -353,10 +423,10 @@ const AttendancePage = {
   // ─────────────────────────────────────────────────────────────────────────
   async loadDailyAttendance() {
     const tbody = document.getElementById('att-tbody');
-    tbody.innerHTML = `<tr><td colspan="5" class="text-center">
+    tbody.innerHTML = `<tr><td colspan="7" class="text-center">
       <i class="fas fa-spinner fa-spin"></i></td></tr>`;
     try {
-      const [{ data: enrollments }, { data: attRecords }] = await Promise.all([
+      const [{ data: enrollments }, { data: attRecords }, { data: allocData }] = await Promise.all([
         DB.getAll('enrollments', {
           select: '*, student:student_id(id, full_name)',
           filter: { level_id: this.levelId, status: 'active' },
@@ -364,9 +434,35 @@ const AttendancePage = {
         DB.getAll('attendance', {
           filter: { level_id: this.levelId, date: this.date },
         }),
+        DB.getStudentAllocations(),
       ]);
 
-      this.students = (enrollments || []).map(e => e.student).filter(Boolean);
+      // Store enrollment slot alongside student for later use in table
+      this.students = (enrollments || []).map(e => {
+        const s = e.student;
+        if (s) s._scheduleSlot = e.schedule_slot || null;
+        return s;
+      }).filter(Boolean);
+
+      // Build a map: studentId → most-relevant allocation
+      // Priority: active first, then most-recent end_date
+      const allAllocs = allocData || [];
+      this._studentAllocMap = {};
+      allAllocs.forEach(a => {
+        const sid = a.student_id;
+        if (!sid) return;
+        const existing = this._studentAllocMap[sid];
+        // Prefer active over expired; among same status, prefer latest end_date
+        if (!existing) {
+          this._studentAllocMap[sid] = a;
+        } else {
+          const activeWins = a.status === 'active' && existing.status !== 'active';
+          const sameStatus = a.status === existing.status;
+          const laterEnd   = sameStatus && (a.end_date || '') > (existing.end_date || '');
+          if (activeWins || laterEnd) this._studentAllocMap[sid] = a;
+        }
+      });
+
       this.records  = {};
       (attRecords || []).forEach(a => {
         this.records[a.student_id] = {
@@ -375,7 +471,7 @@ const AttendancePage = {
           checkin_time: a.checkin_time,
           notes:        a.notes,
           _saving:      false,
-          _saved:       !!a.status,   // already saved if a record exists
+          _saved:       !!a.status,
           _error:       false,
         };
       });
@@ -395,11 +491,12 @@ const AttendancePage = {
     const tbody  = document.getElementById('att-tbody');
     const search = document.getElementById('att-search')?.value?.toLowerCase() || '';
     let students = this.students;
-    if (search) students = students.filter(s => s.full_name?.toLowerCase().includes(search));
+    if (search)              students = students.filter(s => s.full_name?.toLowerCase().includes(search));
+    if (this.slotFilter)     students = students.filter(s => s._scheduleSlot === this.slotFilter);
 
     if (!students.length) {
       tbody.innerHTML = `
-        <tr><td colspan="5">
+        <tr><td colspan="7">
           <div class="empty-state">
             <i class="fas fa-user-slash"></i>
             <h3>No students enrolled in this level</h3>
@@ -416,6 +513,65 @@ const AttendancePage = {
     tbody.innerHTML = students.map(s => this._rowHTML(s)).join('');
   },
 
+  _packageBadgeHTML(studentId) {
+    const alloc = (this._studentAllocMap || {})[studentId];
+    if (!alloc) {
+      return `<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;
+        color:var(--text-muted);padding:3px 8px;border-radius:99px;
+        border:1px dashed var(--border-color)">
+        <i class="fas fa-ban" style="font-size:9px"></i> No package
+      </span>`;
+    }
+
+    const today   = Utils.todayISO();
+    const endDate = alloc.end_date || '';
+    const pkgName = alloc.package?.name || 'Package';
+    const price   = alloc.price_paid != null ? Utils.formatCurrency(alloc.price_paid) : '';
+
+    // Compute days left
+    let daysLeft = null;
+    if (endDate) {
+      const msLeft = new Date(endDate + 'T00:00:00') - new Date(today + 'T00:00:00');
+      daysLeft = Math.ceil(msLeft / 86400000);
+    }
+
+    // Determine visual state
+    let badgeColor, bgColor, icon, statusLabel;
+    if (alloc.status === 'cancelled') {
+      badgeColor = '#6b7280'; bgColor = 'rgba(107,114,128,0.10)';
+      icon = 'fa-times-circle'; statusLabel = 'Cancelled';
+    } else if (alloc.status === 'expired' || daysLeft < 0) {
+      badgeColor = '#ef4444'; bgColor = 'rgba(239,68,68,0.10)';
+      icon = 'fa-exclamation-circle'; statusLabel = 'Expired';
+    } else if (daysLeft !== null && daysLeft <= 7) {
+      badgeColor = '#f59e0b'; bgColor = 'rgba(245,158,11,0.10)';
+      icon = 'fa-clock'; statusLabel = `${daysLeft}d left`;
+    } else {
+      badgeColor = '#22c55e'; bgColor = 'rgba(34,197,94,0.10)';
+      icon = 'fa-check-circle'; statusLabel = 'Active';
+    }
+
+    const endFormatted = endDate ? Utils.formatDate(endDate) : '—';
+
+    return `
+      <div style="display:inline-flex;flex-direction:column;gap:2px;min-width:0">
+        <div style="display:inline-flex;align-items:center;gap:5px;padding:3px 8px;
+          border-radius:99px;border:1px solid ${badgeColor}44;background:${bgColor};
+          font-size:11px;font-weight:600;color:${badgeColor};white-space:nowrap">
+          <i class="fas ${icon}" style="font-size:9px"></i>
+          ${statusLabel}
+        </div>
+        <div style="font-size:10px;color:var(--text-muted);white-space:nowrap;
+          overflow:hidden;text-overflow:ellipsis;max-width:130px"
+          title="${Utils.esc(pkgName)}${price ? ' · ' + price : ''}">
+          ${Utils.esc(pkgName)}${price ? ` <span style="color:var(--brand-primary)">${price}</span>` : ''}
+        </div>
+        <div style="font-size:10px;color:var(--text-muted);white-space:nowrap">
+          <i class="fas fa-calendar-alt" style="font-size:8px;margin-right:2px"></i>ends ${endFormatted}
+        </div>
+      </div>`;
+  },
+
   _rowHTML(s) {
     const rec    = this.records[s.id] || { status: null, checkin_time: '', notes: '', _saving: false, _saved: false, _error: false };
     const saveEl = this._saveIndicatorHTML(s.id, rec);
@@ -430,6 +586,19 @@ const AttendancePage = {
             <span style="font-weight:600">${Utils.esc(s.full_name)}</span>
           </div>
         </td>
+        <td>
+          ${s._scheduleSlot
+            ? `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 8px;
+                border-radius:99px;font-size:11px;font-weight:600;
+                background:rgba(99,102,241,0.10);color:#6366f1;
+                border:1px solid rgba(99,102,241,0.25);white-space:nowrap">
+                <i class="fas fa-clock" style="font-size:9px"></i>
+                ${Utils.esc(s._scheduleSlot)}
+              </span>`
+            : `<span style="font-size:11px;color:var(--text-muted)">—</span>`
+          }
+        </td>
+        <td>${this._packageBadgeHTML(s.id)}</td>
         <td>
           <div class="att-table-actions">
             ${['present','late','absent'].map(st => `
