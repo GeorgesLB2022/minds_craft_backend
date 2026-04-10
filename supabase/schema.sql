@@ -591,5 +591,34 @@ ALTER TABLE trainer_sessions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY IF NOT EXISTS "Authenticated users can do everything on trainer_sessions"
   ON trainer_sessions FOR ALL USING (auth.role() = 'authenticated');
 
+-- M10: Level Schedules — multiple day/time slots per level
+-- Each row is one schedule slot (day + start_time + end_time) for a level.
+-- The legacy day_of_week / start_time / end_time columns on levels remain for
+-- backward compatibility and are kept in sync with the first slot.
+CREATE TABLE IF NOT EXISTS level_schedules (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  level_id    UUID NOT NULL REFERENCES levels(id) ON DELETE CASCADE,
+  day_of_week TEXT NOT NULL,
+  start_time  TIME,
+  end_time    TIME,
+  label       TEXT,           -- optional human label e.g. "Morning Group"
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (level_id, day_of_week, start_time)
+);
+ALTER TABLE level_schedules ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE tablename='level_schedules'
+    AND policyname='Authenticated users can do everything on level_schedules'
+  ) THEN
+    CREATE POLICY "Authenticated users can do everything on level_schedules"
+      ON level_schedules FOR ALL USING (auth.role() = 'authenticated');
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_level_schedules_level ON level_schedules(level_id);
+
+-- M10b: Add schedule_slot to enrollments (stores "Monday 09:00-10:00" or schedule UUID)
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS schedule_slot TEXT DEFAULT NULL;
+
 -- End of migration script
 -- ============================================================
