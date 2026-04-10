@@ -396,10 +396,10 @@ const CoursesPage = {
     if (!panel) return;
     panel.innerHTML = `<div style="text-align:center;padding:1rem;color:var(--text-muted)"><i class="fas fa-spinner fa-spin"></i> Loading students…</div>`;
 
-    // Fetch enrolled students + all available students (for the add dropdown)
-    const [{ data: enrollments, error: enrErr }, { data: allStudents, error: stuErr }] = await Promise.all([
+    const [{ data: enrollments, error: enrErr }, { data: allStudents, error: stuErr }, { data: levelSlots }] = await Promise.all([
       DB.getLevelEnrollments(levelId),
       DB.getStudents(),
+      DB.getLevelSchedules(levelId),
     ]);
 
     if (enrErr || stuErr) {
@@ -410,7 +410,7 @@ const CoursesPage = {
     const enrolledIds = new Set((enrollments || []).map(e => e.student_id));
     const availableStudents = (allStudents || []).filter(s => !enrolledIds.has(s.id) && s.status === 'active');
 
-    panel.innerHTML = this.enrollmentPanelHTML(levelId, enrollments || [], availableStudents);
+    panel.innerHTML = this.enrollmentPanelHTML(levelId, enrollments || [], availableStudents, levelSlots || []);
 
     // Update the count badge on the level card header without re-rendering everything
     this._refreshLevelBadge(levelId, enrollments || []);
@@ -447,8 +447,7 @@ const CoursesPage = {
     oldBadge.replaceWith(newBadge);
   },
 
-  enrollmentPanelHTML(levelId, enrollments, availableStudents) {
-    const statusColors = { active: 'badge-green', inactive: 'badge-gray', completed: 'badge-blue', dropped: 'badge-red' };
+  enrollmentPanelHTML(levelId, enrollments, availableStudents, levelSlots = []) {
     return `
       <div>
         <!-- Header row -->
@@ -477,6 +476,7 @@ const CoursesPage = {
                  <thead>
                    <tr>
                      <th>Student</th>
+                     <th>Schedule Slot</th>
                      <th>Enrolled</th>
                      <th>Status</th>
                      <th style="text-align:right">Actions</th>
@@ -486,6 +486,11 @@ const CoursesPage = {
                    ${enrollments.map(e => {
                      const s = e.student || {};
                      const color = s.avatar_color || Utils.avatarColor(s.full_name);
+                     const slotOpts = levelSlots.map(sl => {
+                       const key = this._slotKey(sl);
+                       const lbl = sl.label ? `${sl.label} (${key})` : key;
+                       return `<option value="${Utils.esc(key)}" ${e.schedule_slot===key?'selected':''}>${Utils.esc(lbl)}</option>`;
+                     }).join('');
                      return `
                        <tr>
                          <td>
@@ -496,6 +501,16 @@ const CoursesPage = {
                                ${s.phone ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(s.phone)}</div>` : ''}
                              </div>
                            </div>
+                         </td>
+                         <td style="min-width:160px">
+                           ${levelSlots.length > 0
+                             ? `<select class="form-select" style="padding:3px 8px;font-size:var(--font-size-xs);width:100%"
+                                 onchange="CoursesPage.changeEnrollSlot('${e.id}', this.value, '${levelId}')">
+                                 <option value="">— Assign slot —</option>
+                                 ${slotOpts}
+                               </select>`
+                             : `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">No slots defined</span>`
+                           }
                          </td>
                          <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${e.enrolled_at ? Utils.fmtDate(e.enrolled_at) : '—'}</td>
                          <td>
@@ -529,7 +544,7 @@ const CoursesPage = {
       <div id="enroll-modal-body">
         <div style="text-align:center;padding:2rem;color:var(--text-muted)"><i class="fas fa-spinner fa-spin fa-2x"></i></div>
       </div>
-    `);
+    `, { size: 'lg' });
     this._loadEnrollModalBody(levelId);
   },
 
@@ -537,11 +552,13 @@ const CoursesPage = {
     const el = document.getElementById('enroll-modal-body');
     if (!el) return;
 
-    const [{ data: enrollments }, { data: allStudents }] = await Promise.all([
+    const [{ data: enrollments }, { data: allStudents }, { data: levelSlots }] = await Promise.all([
       DB.getLevelEnrollments(levelId),
       DB.getStudents(),
+      DB.getLevelSchedules(levelId),
     ]);
 
+    const slots = levelSlots || [];
     const enrolledIds = new Set((enrollments || []).map(e => e.student_id));
     const available = (allStudents || []).filter(s => !enrolledIds.has(s.id) && s.status === 'active');
 
@@ -560,16 +577,38 @@ const CoursesPage = {
       return;
     }
 
+    // Slot selector HTML
+    const slotSelectHTML = slots.length > 0
+      ? `<div class="form-group" style="margin-top:10px">
+           <label class="form-label">
+             <i class="fas fa-calendar-alt" style="margin-right:4px;color:var(--brand-primary)"></i>
+             Assign Schedule Slot
+           </label>
+           <select id="enroll-slot-select" class="form-select">
+             <option value="">— Select Slot —</option>
+             ${slots.map(s => {
+               const key = this._slotKey(s);
+               const lbl = s.label ? `${s.label} — ${key}` : key;
+               return `<option value="${Utils.esc(key)}">${Utils.esc(lbl)}</option>`;
+             }).join('')}
+           </select>
+         </div>`
+      : `<p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:6px">
+           <i class="fas fa-info-circle"></i> No schedule slots defined for this level yet.
+           Edit the level to add slots.
+         </p>`;
+
     el.innerHTML = `
       <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-bottom:1rem">
-        Select a student to enroll. Only active, not-yet-enrolled students are shown.
+        Select a student and a schedule slot, then click their name to enroll.
       </p>
-      <div class="form-group">
+      ${slotSelectHTML}
+      <div class="form-group" style="margin-top:10px">
         <label class="form-label">Search</label>
         <input type="text" id="enroll-search" class="form-input" placeholder="Type a name…"
           oninput="CoursesPage._filterEnrollList(this.value)" />
       </div>
-      <div id="enroll-student-list" style="max-height:320px;overflow-y:auto;border:1px solid var(--border-color);border-radius:var(--radius-md)">
+      <div id="enroll-student-list" style="max-height:300px;overflow-y:auto;border:1px solid var(--border-color);border-radius:var(--radius-md)">
         ${available.map(s => `
           <div class="enroll-student-row" data-name="${Utils.esc(s.full_name?.toLowerCase() || '')}"
             style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border-color);cursor:pointer;transition:background .15s"
@@ -600,13 +639,22 @@ const CoursesPage = {
   },
 
   async confirmEnroll(studentId, studentName, levelId) {
-    const { error } = await DB.enrollStudent(studentId, levelId, 'active');
+    const slot = document.getElementById('enroll-slot-select')?.value || null;
+    const { error } = await DB.enrollStudent(studentId, levelId, 'active', slot);
     if (error) {
       Toast.error(error.message || 'Failed to enroll student');
       return;
     }
-    Toast.success(`${studentName} enrolled successfully!`);
+    const slotMsg = slot ? ` (${slot})` : '';
+    Toast.success(`${studentName} enrolled successfully!${slotMsg}`);
     Modal.close();
+    await this.loadEnrollmentPanel(levelId);
+  },
+
+  async changeEnrollSlot(enrollmentId, slot, levelId) {
+    const { error } = await DB.setEnrollmentSlot(enrollmentId, slot);
+    if (error) { Toast.error('Failed to update slot'); return; }
+    Toast.success('Schedule slot updated');
     await this.loadEnrollmentPanel(levelId);
   },
 
@@ -644,32 +692,100 @@ const CoursesPage = {
   },
 
   async _openLevelModal(id) {
-    const [{ data: lv }, { data: assignments }] = await Promise.all([
+    const [{ data: lv }, { data: assignments }, { data: schedules }] = await Promise.all([
       DB.getOne('levels', id),
       DB.getLevelTrainerAssignments(id),
+      DB.getLevelSchedules(id),
     ]);
     if (!lv) return Toast.error('Level not found');
 
     // Merge: trainer_assignments rows + legacy levels.trainer_id (single FK)
-    // This ensures trainers assigned via the old single-select are shown as checked
     const fromAssignments = (assignments || []).map(a => a.trainer_id);
     const assignedTrainerIds = [...new Set([
       ...fromAssignments,
-      ...(lv.trainer_id ? [lv.trainer_id] : []),  // include legacy single FK
+      ...(lv.trainer_id ? [lv.trainer_id] : []),
     ])];
-
-    // Auto-migrate: if legacy trainer_id exists but no row in trainer_assignments,
-    // write it now so the trainer card reflects it immediately
     if (lv.trainer_id && !fromAssignments.includes(lv.trainer_id)) {
       await DB.setLevelTrainerAssignments(id, assignedTrainerIds).catch(() => {});
     }
 
-    Modal.open('Edit Level', this.levelFormHTML(lv, assignedTrainerIds), { size: 'lg' });
+    // If no schedules yet but level has legacy day/time, seed one slot for display
+    let existingSlots = schedules || [];
+    if (!existingSlots.length && lv.day_of_week) {
+      existingSlots = [{
+        id: null,
+        day_of_week: lv.day_of_week,
+        start_time:  lv.start_time  || '',
+        end_time:    lv.end_time    || '',
+        label:       '',
+      }];
+    }
+
+    Modal.open('Edit Level', this.levelFormHTML(lv, assignedTrainerIds, existingSlots), { size: 'lg' });
   },
 
-  levelFormHTML(lv, assignedTrainerIds = []) {
+  // ── helpers for schedule slot UI ─────────────────────────────────────────
+  _slotRowHTML(slot, idx) {
     const days = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+    return `
+      <div class="level-slot-row" data-idx="${idx}"
+        style="display:flex;align-items:flex-end;gap:8px;padding:8px 10px;
+          background:var(--bg-tertiary);border-radius:var(--radius-sm);margin-bottom:6px">
+        <div class="form-group" style="margin:0;flex:1.2;min-width:100px">
+          <label class="form-label" style="font-size:10px">Day</label>
+          <select name="slot_day" class="form-select" style="padding:5px 8px;font-size:var(--font-size-xs)">
+            <option value="">— Day —</option>
+            ${days.map(d => `<option value="${d}" ${slot.day_of_week===d?'selected':''}>${d}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group" style="margin:0;flex:1;min-width:80px">
+          <label class="form-label" style="font-size:10px">Start</label>
+          <input type="time" name="slot_start" class="form-input" value="${slot.start_time || ''}" style="padding:5px 8px;font-size:var(--font-size-xs)" />
+        </div>
+        <div class="form-group" style="margin:0;flex:1;min-width:80px">
+          <label class="form-label" style="font-size:10px">End</label>
+          <input type="time" name="slot_end" class="form-input" value="${slot.end_time || ''}" style="padding:5px 8px;font-size:var(--font-size-xs)" />
+        </div>
+        <div class="form-group" style="margin:0;flex:1.5;min-width:100px">
+          <label class="form-label" style="font-size:10px">Label <span style="color:var(--text-muted)">(opt.)</span></label>
+          <input type="text" name="slot_label" class="form-input" value="${Utils.esc(slot.label || '')}" placeholder="e.g. Morning group" style="padding:5px 8px;font-size:var(--font-size-xs)" />
+        </div>
+        <button type="button" class="btn btn-danger btn-icon btn-sm" style="margin-bottom:2px;flex-shrink:0"
+          onclick="CoursesPage._removeSlotRow(this)" title="Remove slot">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+    `;
+  },
+
+  _removeSlotRow(btn) {
+    btn.closest('.level-slot-row')?.remove();
+  },
+
+  _addSlotRow() {
+    const container = document.getElementById('level-slots-container');
+    if (!container) return;
+    const idx = container.querySelectorAll('.level-slot-row').length;
+    container.insertAdjacentHTML('beforeend', this._slotRowHTML({ day_of_week:'', start_time:'', end_time:'', label:'' }, idx));
+  },
+
+  _readSlotsFromForm() {
+    const rows = document.querySelectorAll('#level-slots-container .level-slot-row');
+    const slots = [];
+    rows.forEach(row => {
+      const day   = row.querySelector('[name="slot_day"]')?.value  || '';
+      const start = row.querySelector('[name="slot_start"]')?.value || '';
+      const end   = row.querySelector('[name="slot_end"]')?.value   || '';
+      const label = row.querySelector('[name="slot_label"]')?.value || '';
+      if (day) slots.push({ day_of_week: day, start_time: start || null, end_time: end || null, label: label || null });
+    });
+    return slots;
+  },
+
+  levelFormHTML(lv, assignedTrainerIds = [], existingSlots = []) {
     const trainers = this._trainers || [];
+    // Seed one empty slot if none provided
+    const slots = existingSlots.length ? existingSlots : [{ day_of_week:'', start_time:'', end_time:'', label:'' }];
     return `
       <form onsubmit="CoursesPage.saveLevel(event, ${lv ? `'${lv.id}'` : 'null'})">
         <div class="form-row">
@@ -696,23 +812,26 @@ const CoursesPage = {
             <input type="number" name="max_age" class="form-input" value="${lv?.max_age ?? 18}" />
           </div>
         </div>
-        <div class="form-row-3">
-          <div class="form-group">
-            <label class="form-label">Day of Week</label>
-            <select name="day_of_week" class="form-select">
-              <option value="">— Select —</option>
-              ${days.map(d => `<option value="${d}" ${lv?.day_of_week===d?'selected':''}>${d}</option>`).join('')}
-            </select>
+
+        <!-- ── Schedule Slots ── -->
+        <div class="form-group">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+            <label class="form-label" style="margin:0">
+              <i class="fas fa-calendar-alt" style="margin-right:5px;color:var(--brand-primary)"></i>
+              Schedule Slots
+              <span style="font-size:10px;font-weight:400;color:var(--text-muted);margin-left:4px">
+                (add one row per day/time this level meets)
+              </span>
+            </label>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="CoursesPage._addSlotRow()" style="font-size:var(--font-size-xs)">
+              <i class="fas fa-plus"></i> Add Slot
+            </button>
           </div>
-          <div class="form-group">
-            <label class="form-label">Start Time</label>
-            <input type="time" name="start_time" class="form-input" value="${lv?.start_time || ''}" />
-          </div>
-          <div class="form-group">
-            <label class="form-label">End Time</label>
-            <input type="time" name="end_time" class="form-input" value="${lv?.end_time || ''}" />
+          <div id="level-slots-container">
+            ${slots.map((s, i) => this._slotRowHTML(s, i)).join('')}
           </div>
         </div>
+
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Duration (minutes)</label>
@@ -727,7 +846,7 @@ const CoursesPage = {
           <label class="form-label">Trainers <span style="font-size:11px;font-weight:400;color:var(--text-muted)">(select one or more)</span></label>
           ${trainers.length === 0
             ? `<p style="font-size:var(--font-size-sm);color:var(--text-muted)">No trainers available. Add trainers first.</p>`
-            : `<div style="display:flex;flex-direction:column;gap:6px;max-height:160px;overflow-y:auto;
+            : `<div style="display:flex;flex-direction:column;gap:6px;max-height:140px;overflow-y:auto;
                   background:var(--bg-tertiary);border:1px solid var(--border-color);
                   border-radius:var(--radius-md);padding:10px 12px">
                 ${trainers.map(t => `
@@ -771,19 +890,24 @@ const CoursesPage = {
     // Collect multi-select trainer checkboxes
     const trainerIds = Array.from(e.target.querySelectorAll('input[name="trainer_ids"]:checked'))
       .map(cb => cb.value);
+    // Collect schedule slots from dynamic rows
+    const slots = this._readSlotsFromForm();
     const raw = Object.fromEntries(fd.entries());
+
+    // Use first slot for legacy day_of_week / start_time / end_time on the level row
+    const firstSlot = slots[0] || {};
     const data = {
       name: raw.name,
       description: raw.description || null,
       order_num: parseInt(raw.order_num) || 1,
       min_age: parseInt(raw.min_age) || 5,
       max_age: parseInt(raw.max_age) || 18,
-      day_of_week: raw.day_of_week || null,
-      start_time: raw.start_time || null,
-      end_time: raw.end_time || null,
+      // Keep legacy single-slot columns in sync with the first slot
+      day_of_week: firstSlot.day_of_week || null,
+      start_time:  firstSlot.start_time  || null,
+      end_time:    firstSlot.end_time    || null,
       duration_mins: parseInt(raw.duration_mins) || 60,
       capacity: parseInt(raw.capacity) || 15,
-      // Keep trainer_id as first selected trainer for legacy compatibility
       trainer_id: trainerIds[0] || null,
       acquisitions: raw.acquisitions_str ? raw.acquisitions_str.split(',').map(s => s.trim()).filter(Boolean) : [],
       prerequisites: raw.prerequisites_str ? raw.prerequisites_str.split(',').map(s => s.trim()).filter(Boolean) : [],
@@ -794,11 +918,27 @@ const CoursesPage = {
       const result = id ? await DB.updateLevel(id, data) : await DB.createLevel(data);
       if (result.error) throw result.error;
       const levelId = id || result.data?.id;
-      // Sync trainer_assignments for this level
-      if (levelId) await DB.setLevelTrainerAssignments(levelId, trainerIds);
+
+      await Promise.all([
+        // Sync trainer_assignments
+        levelId ? DB.setLevelTrainerAssignments(levelId, trainerIds) : Promise.resolve(),
+        // Sync schedule slots
+        levelId ? DB.setLevelSchedules(levelId, slots) : Promise.resolve(),
+      ]);
+
+      // Migration: if this is an edit and existing enrolled students have no slot,
+      // assign them to the first slot automatically
+      if (id && slots.length > 0) {
+        const firstSlotLabel = this._slotKey(slots[0]);
+        const { data: enrollments } = await DB.getLevelEnrollments(id);
+        const unassigned = (enrollments || []).filter(en => !en.schedule_slot);
+        await Promise.all(
+          unassigned.map(en => DB.setEnrollmentSlot(en.id, firstSlotLabel).catch(() => {}))
+        );
+      }
+
       Toast.success(id ? 'Level updated!' : 'Level added!');
       Modal.close();
-      // Preserve expanded state after refresh
       const wasExpanded = this._expandedLevel;
       await this.renderCurriculum();
       if (wasExpanded) {
@@ -812,6 +952,13 @@ const CoursesPage = {
         }
       }
     } catch (err) { Toast.error(err.message || 'Failed to save level'); }
+  },
+
+  /** Canonical string key for a slot — used as schedule_slot value on enrollments */
+  _slotKey(slot) {
+    if (!slot?.day_of_week) return '';
+    const t = slot.start_time ? ` ${slot.start_time}${slot.end_time ? '-' + slot.end_time : ''}` : '';
+    return `${slot.day_of_week}${t}`;
   },
 
   async deleteLevel(id) {
