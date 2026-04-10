@@ -189,6 +189,42 @@ const DB = {
     });
   },
 
+  // ─────────────────────────────────────────────
+  // LEVEL SCHEDULES (multiple day/time slots per level)
+  // ─────────────────────────────────────────────
+
+  /** Get all schedule slots for a level */
+  async getLevelSchedules(levelId) {
+    return this.getAll('level_schedules', {
+      select: 'id, level_id, day_of_week, start_time, end_time, label',
+      filter: { level_id: levelId },
+      order: 'day_of_week',
+    });
+  },
+
+  /** Replace all schedule slots for a level with a new array */
+  async setLevelSchedules(levelId, slots) {
+    if (!_supabase) return { error: new Error('Not initialized') };
+    // Delete existing slots for this level
+    await _supabase.from('level_schedules').delete().eq('level_id', levelId);
+    if (!slots || !slots.length) return { data: [], error: null };
+    // Insert new slots
+    const rows = slots.map(s => ({
+      level_id:    levelId,
+      day_of_week: s.day_of_week,
+      start_time:  s.start_time  || null,
+      end_time:    s.end_time    || null,
+      label:       s.label       || null,
+    }));
+    const { data, error } = await _supabase.from('level_schedules').insert(rows).select();
+    return { data, error };
+  },
+
+  /** Update the schedule_slot field on a single enrollment */
+  async setEnrollmentSlot(enrollmentId, slot) {
+    return this.update('enrollments', enrollmentId, { schedule_slot: slot || null });
+  },
+
   /** Get all enrollments for a specific student */
   async getStudentEnrollments(studentId) {
     return this.getAll('enrollments', {
@@ -200,11 +236,13 @@ const DB = {
   },
 
   /** Enroll a student in a level (safe — ignores duplicate) */
-  async enrollStudent(studentId, levelId, status = 'active') {
+  async enrollStudent(studentId, levelId, status = 'active', scheduleSlot = null) {
     if (!_supabase) return { data: null, error: new Error('Not initialized') };
+    const row = { student_id: studentId, level_id: levelId, status, enrolled_at: Utils.localDateISO() };
+    if (scheduleSlot) row.schedule_slot = scheduleSlot;
     const { data, error } = await _supabase
       .from('enrollments')
-      .upsert({ student_id: studentId, level_id: levelId, status, enrolled_at: Utils.localDateISO() }, { onConflict: 'student_id,level_id' })
+      .upsert(row, { onConflict: 'student_id,level_id' })
       .select()
       .single();
     return { data, error };
