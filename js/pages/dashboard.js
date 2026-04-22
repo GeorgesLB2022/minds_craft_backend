@@ -68,7 +68,7 @@ const DashboardPage = {
         { data: attendance },
         { data: allocations },
       ] = await Promise.all([
-        DB.getAll('users'),
+        DB.getAll('users', { limit: 2000 }),
         DB.getAll('courses'),
         DB.getAll('events', { filter: { status: 'upcoming' }, limit: 5, order: 'start_date' }),
         DB.getAll('transactions', { limit: 500, order: 'date', asc: false }),
@@ -166,8 +166,8 @@ const DashboardPage = {
       this.renderActivity(users || [], transactions || [], attendance || []);
 
     } catch (err) {
-      console.error('Dashboard load error:', err);
-      Toast.error('Failed to load dashboard data');
+      console.error('[Dashboard] load error:', err?.code, err?.message, err?.details, err?.hint, err);
+      Toast.error('Dashboard error: ' + (err?.message || String(err)));
     }
   },
 
