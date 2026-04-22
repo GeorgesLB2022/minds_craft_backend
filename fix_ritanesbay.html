@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Fix ritanesbay — Minds' Craft</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#f0f4ff;
+       padding:24px;max-width:720px;margin:0 auto;line-height:1.6}
+  h1{color:#22c55e;font-size:1.2rem;margin-bottom:4px}
+  .sub{color:#9ba8c4;font-size:0.8rem;margin-bottom:20px}
+  .card{background:#1d2333;border-radius:10px;padding:20px;border:1px solid #262f45;margin-bottom:14px}
+  .card-title{font-size:0.88rem;font-weight:700;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+  .badge{width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;
+         justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
+  .b-green{background:#22c55e;color:#000}
+  .b-blue{background:#3b82f6;color:#fff}
+  .b-amber{background:#f59e0b;color:#000}
+  .warn-box{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);
+            border-radius:8px;padding:12px;font-size:0.8rem;color:#fde68a;margin-bottom:10px}
+  .info-box{background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);
+            border-radius:8px;padding:12px;font-size:0.8rem;color:#a7f3d0;margin-bottom:10px}
+  .sql-wrap{position:relative}
+  .sql-box{background:#0a0d14;border:1px solid #1e2640;border-radius:6px;padding:14px;
+           font-size:0.72rem;white-space:pre;overflow-x:auto;color:#c5cfdf;
+           font-family:'Courier New',monospace;line-height:1.8}
+  .copy-btn{position:absolute;top:8px;right:8px;background:#22c55e;color:#000;
+            border:none;padding:5px 14px;border-radius:5px;cursor:pointer;
+            font-size:0.75rem;font-weight:700}
+  .copy-btn:hover{opacity:.85}
+  a{color:#22c55e;font-weight:600}
+  .step{display:flex;gap:10px;align-items:flex-start;margin-bottom:10px;font-size:0.82rem}
+  .step-num{background:#22c55e;color:#000;min-width:22px;height:22px;border-radius:50%;
+            display:flex;align-items:center;justify-content:center;font-weight:700;
+            font-size:0.72rem;flex-shrink:0;margin-top:1px}
+  label{color:#9ba8c4;font-size:0.75rem;display:block;margin-bottom:3px;margin-top:10px}
+  input{width:100%;background:#242c3e;border:1px solid #262f45;color:#f0f4ff;
+        padding:8px 12px;border-radius:6px;font-family:inherit;font-size:0.8rem;outline:none}
+  input:focus{border-color:#22c55e}
+  .btn{border:none;padding:10px 20px;border-radius:6px;font-size:0.82rem;font-weight:700;
+       cursor:pointer;margin-top:10px;width:100%}
+  .btn-green{background:#22c55e;color:#000}
+  .btn:hover{opacity:.85} .btn:disabled{opacity:.4;cursor:not-allowed}
+  .log{background:#0a0d14;border-radius:6px;padding:10px 12px;margin-top:8px;
+       font-size:0.75rem;line-height:1.8;font-family:monospace;border:1px solid #1e2640;min-height:32px}
+  .ok{color:#22c55e}.err{color:#ef4444}.inf{color:#9ba8c4}.warn{color:#f59e0b}
+</style>
+</head>
+<body>
+
+<h1>🔧 Fix: <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="4b39223f2a252e38292a320b2c262a222765282426">[email&#160;protected]</a></h1>
+<p class="sub">Step-by-step repair for the foreign key error on UID sync.</p>
+
+<!-- WHAT HAPPENED -->
+<div class="card">
+  <div class="card-title"><span class="badge b-amber">!</span> What went wrong</div>
+  <p style="font-size:0.82rem;color:#9ba8c4">
+    The <code>users</code> table has a <strong>self-referencing FK</strong>: students have <code>parent_id → users.id</code>.
+    Swapping a parent's <code>id</code> violates this constraint from both directions — no ordering trick fixes it cleanly.<br><br>
+    The correct fix: temporarily set <code>session_replication_role = replica</code> which bypasses FK checks for the session,
+    update both the parent <code>id</code> and children <code>parent_id</code>, then restore to <code>DEFAULT</code>.
+    This is safe and atomic in Supabase (requires the <code>postgres</code> role, which the SQL Editor uses).
+  </p>
+</div>
+
+<!-- SQL TO RUN NOW -->
+<div class="card">
+  <div class="card-title"><span class="badge b-green">1</span> Run this SQL in Supabase — copies everything correctly</div>
+
+  <div class="warn-box">
+    Open
+    <a href="https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new" target="_blank">
+      Supabase SQL Editor ↗
+    </a>
+    → paste the SQL below → click <strong>Run</strong>
+  </div>
+
+  <div class="sql-wrap">
+    <pre class="sql-box" id="main-sql">-- ════════════════════════════════════════════════════════
+-- Fix <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="deacb7aabfb0bbadbcbfa79eb9b3bfb7b2f0bdb1b3">[email&#160;protected]</a> — Auth account + UID sync
+-- Safe to run multiple times (idempotent)
+-- ════════════════════════════════════════════════════════
+
+DO $$
+DECLARE
+  v_auth  UUID;   -- auth.users id  (Supabase Auth)
+  v_pub   UUID;   -- public.users id (current value)
+BEGIN
+
+  -- 1. Get current IDs
+  SELECT id INTO v_auth FROM auth.users  WHERE email = '<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="aedcc7dacfc0cbddcccfd7eec9c3cfc7c280cdc1c3">[email&#160;protected]</a>' LIMIT 1;
+  SELECT id INTO v_pub  FROM public.users WHERE email = '<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="9be9f2effaf5fee8f9fae2dbfcf6faf2f7b5f8f4f6">[email&#160;protected]</a>' LIMIT 1;
+
+  -- 2. Create auth account if it doesn't exist yet
+  IF v_auth IS NULL THEN
+    RAISE NOTICE 'No auth account found — creating one with same UUID as public.users';
+    INSERT INTO auth.users (
+      id, instance_id, email, encrypted_password,
+      email_confirmed_at, created_at, updated_at,
+      raw_app_meta_data, raw_user_meta_data,
+      is_super_admin, role, aud
+    ) VALUES (
+      v_pub,                                          -- use same UUID → no mismatch!
+      '00000000-0000-0000-0000-000000000000',
+      '<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="31435845505f544253504871565c50585d1f525e5c">[email&#160;protected]</a>',
+      crypt('+96103455983', gen_salt('bf')),           -- password = phone
+      NOW(), NOW(), NOW(),
+      '{"provider":"email","providers":["email"]}',
+      '{"user_type":"parent","full_name":"Ritan Esbay"}',
+      false, 'authenticated', 'authenticated'
+    );
+    INSERT INTO auth.identities (
+      id, user_id, provider_id, provider,
+      identity_data, created_at, updated_at, last_sign_in_at
+    ) VALUES (
+      gen_random_uuid(),
+      v_pub,
+      '<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="a0d2c9d4c1cec5d3c2c1d9e0c7cdc1c9cc8ec3cfcd">[email&#160;protected]</a>',
+      'email',
+      jsonb_build_object('sub', v_pub::text, 'email', '<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="fb89928f9a959e88999a82bb9c969a9297d5989496">[email&#160;protected]</a>'),
+      NOW(), NOW(), NOW()
+    ) ON CONFLICT DO NOTHING;
+    RAISE NOTICE '✅ Auth account created for <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="37455e435659524455564e77505a565e5b1954585a">[email&#160;protected]</a>';
+
+  ELSE
+    -- 3. Auth account already exists — update password + confirm
+    RAISE NOTICE 'Auth account found (auth id: %)', v_auth;
+    UPDATE auth.users
+    SET encrypted_password  = crypt('+96103455983', gen_salt('bf')),
+        email_confirmed_at  = COALESCE(email_confirmed_at, NOW()),
+        updated_at          = NOW()
+    WHERE email = '<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="6e1c071a0f000b1d0c0f172e09030f0702400d0103">[email&#160;protected]</a>';
+    RAISE NOTICE '✅ Password reset and email confirmed';
+
+    -- 4. Sync UID if auth id ≠ public.users id
+    --    Strategy: bypass FK checks temporarily, update parent id + children atomically
+    IF v_pub IS NOT NULL AND v_auth <> v_pub THEN
+      RAISE NOTICE 'UID mismatch: public=% vs auth=% — fixing…', v_pub, v_auth;
+
+      -- Disable FK enforcement for this session
+      SET session_replication_role = replica;
+
+      -- a) Update the parent row id (FK target)
+      UPDATE public.users SET id = v_auth WHERE id = v_pub;
+      RAISE NOTICE '  → Parent row id updated to %', v_auth;
+
+      -- b) Update children to point to new id
+      UPDATE public.users SET parent_id = v_auth WHERE parent_id = v_pub;
+      RAISE NOTICE '  → Children parent_id updated';
+
+      -- Restore FK enforcement
+      SET session_replication_role = DEFAULT;
+
+    ELSE
+      RAISE NOTICE '✅ UIDs already match — no id change needed';
+    END IF;
+  END IF;
+
+END $$;
+
+-- ════════════════════════════════════════════
+-- Verify result
+-- ════════════════════════════════════════════
+SELECT
+  u.full_name,
+  u.email,
+  u.phone,
+  a.email_confirmed_at IS NOT NULL  AS auth_confirmed,
+  u.id                               AS public_id,
+  a.id                               AS auth_id,
+  CASE WHEN u.id = a.id THEN '✅ match' ELSE '❌ mismatch' END AS uid_status,
+  (SELECT COUNT(*) FROM public.users c WHERE c.parent_id = u.id) AS children_count
+FROM public.users u
+LEFT JOIN auth.users a ON a.email = u.email
+WHERE u.email = '<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="bac8d3cedbd4dfc9d8dbc3faddd7dbd3d694d9d5d7">[email&#160;protected]</a>';
+</pre>
+    <button class="copy-btn" onclick="copySql()">📋 Copy SQL</button>
+  </div>
+</div>
+
+<!-- STEP 2: TEST -->
+<div class="card">
+  <div class="card-title"><span class="badge b-blue">2</span> Test login after running the SQL</div>
+  <label>Email</label>
+  <input id="t-email" value="ritanesbay@gmail.com" readonly/>
+  <label>Password (phone number)</label>
+  <input id="t-pw" value="+96103455983"/>
+  <button class="btn btn-green" onclick="testLogin()">🔑 Test Login Now</button>
+  <div class="log" id="test-log"><span class="inf">Run the SQL first, then click Test Login.</span></div>
+</div>
+
+<!-- STEP 3: OPEN PORTAL -->
+<div class="card">
+  <div class="card-title"><span class="badge b-green">3</span> Open Parent Portal</div>
+  <div class="info-box">
+    Once login test shows ✅ — the parent can use the portal directly.
+  </div>
+  <div class="step">
+    <span class="step-num">→</span>
+    <span>
+      <a href="parent_portal.html" target="_blank">Open Parent Portal</a>
+      &nbsp;·&nbsp; Email: <code><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="6b19021f0a050e18090a122b0c060a020745080406">[email&#160;protected]</a></code>
+      &nbsp;·&nbsp; Password: <code>+96103455983</code>
+    </span>
+  </div>
+</div>
+
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+const SB_URL  = 'https://xiatsareoruybucwkpkc.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpYXRzYXJlb3J1eWJ1Y3drcGtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjgzOTcsImV4cCI6MjA4OTk0NDM5N30.l14cNOUt1PKqL0hl5VL5wpt2JRB9rG_gQlJeYeJNIqU';
+
+function log(msg, cls='inf') {
+  const el = document.getElementById('test-log');
+  if (el.innerHTML.includes('Run the SQL')) el.innerHTML = '';
+  el.innerHTML += `<div class="${cls}">${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function copySql() {
+  const txt = document.getElementById('main-sql').textContent;
+  navigator.clipboard.writeText(txt)
+    .then(() => alert('✅ SQL copied!\n\nPaste at:\nhttps://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new\n\nThen click RUN.'))
+    .catch(() => alert('Select all text in the SQL box manually: Ctrl+A then Ctrl+C'));
+}
+
+async function testLogin() {
+  document.getElementById('test-log').innerHTML = '';
+  const email = document.getElementById('t-email').value.trim();
+  const pw    = document.getElementById('t-pw').value.trim();
+
+  log(`Testing ${email} / ${pw}…`, 'inf');
+  const sb = supabase.createClient(SB_URL, SB_ANON);
+
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pw });
+
+  if (error) {
+    log(`❌ Login failed: ${error.message}`, 'err');
+    if (error.message.toLowerCase().includes('confirm')) {
+      log('→ Email not confirmed yet. Re-run the SQL above to confirm.', 'warn');
+    } else if (error.message.toLowerCase().includes('invalid') || error.message.toLowerCase().includes('credentials')) {
+      log('→ Wrong password or account doesn\'t exist yet. Run the SQL above first.', 'warn');
+    }
+    return;
+  }
+
+  const uid = data.user.id;
+  log(`✅ LOGIN SUCCESS!  auth UID: ${uid}`, 'ok');
+
+  // Check profile
+  const { data: rows } = await sb.from('users')
+    .select('id, full_name, user_type, phone')
+    .eq('email', email)
+    .order('created_at', { ascending: false });
+  await sb.auth.signOut();
+
+  if (!rows?.length) {
+    log('❌ No row in public.users — profile missing!', 'err');
+    return;
+  }
+
+  const match = rows.find(r => r.id === uid);
+  if (match) {
+    log(`✅ public.users.id matches auth UID → portal will work!`, 'ok');
+    log(`   Name: ${match.full_name} | Type: ${match.user_type}`, 'ok');
+    log(`   <a href="parent_portal.html" target="_blank" style="color:#22c55e">→ Open Parent Portal now ↗</a>`, 'ok');
+  } else {
+    log(`⚠️ UID still mismatched: auth=${uid.slice(0,12)}… / public=${rows[0].id.slice(0,12)}…`, 'warn');
+    log('→ Re-run the SQL above — the fix should resolve this.', 'warn');
+  }
+}
+</script>
+<script src="https://www.genspark.ai/sandbox_inspect.js"></script></body>
+</html>
