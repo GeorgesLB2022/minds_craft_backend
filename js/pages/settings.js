@@ -440,10 +440,11 @@ const SettingsPage = {
           <input type="password" id="new-supabase-key" class="form-input" placeholder="eyJhbGciOiJIUzI1NiIs…" />
           <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">Leave blank to keep existing key.</p>
         </div>
-        <div style="display:flex;gap:8px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="SettingsPage.saveDBConfig()"><i class="fas fa-save"></i> Save & Reconnect</button>
-          <button class="btn btn-secondary" onclick="SettingsPage.testConnection()"><i class="fas fa-plug"></i> Test Connection</button>
+          <button class="btn btn-secondary" onclick="SettingsPage.testConnection(event)"><i class="fas fa-stethoscope"></i> Run Diagnostics</button>
         </div>
+        <div id="db-diag-results"></div>
       </div>
 
       <div class="card">
@@ -489,14 +490,102 @@ const SettingsPage = {
   },
 
   async testConnection() {
-    Toast.info('Testing connection…');
-    try {
-      const { data, error } = await DB.getAll('settings', { limit: 1 });
-      if (error) throw error;
-      Toast.success('Connection successful!');
-    } catch (err) {
-      Toast.error('Connection failed: ' + (err.message || 'Unknown error'));
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Testing…'; }
+    const resultsEl = document.getElementById('db-diag-results');
+    if (resultsEl) resultsEl.innerHTML = '<div style="color:var(--text-muted);font-size:.8rem"><i class="fas fa-spinner fa-spin"></i> Running diagnostics…</div>';
+
+    const tables = ['users','courses','levels','enrollments','attendance','transactions','student_allocations','packages','settings'];
+    const rows = [];
+    let allOk = true;
+
+    for (const tbl of tables) {
+      try {
+        const { data, error, count } = await DB.getAll(tbl, { limit: 1 });
+        if (error) {
+          rows.push({ table: tbl, status: '❌', detail: `${error.code}: ${error.message}` });
+          allOk = false;
+          console.error(`[DB diag] ${tbl}:`, error);
+        } else {
+          rows.push({ table: tbl, status: '✅', detail: 'OK' });
+        }
+      } catch (e) {
+        rows.push({ table: tbl, status: '⚠️', detail: e.message });
+        allOk = false;
+      }
     }
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-stethoscope"></i> Run Diagnostics'; }
+
+    const html = `
+      <div style="margin-top:1rem">
+        <div style="font-weight:600;margin-bottom:.5rem;font-size:.85rem">
+          ${allOk
+            ? '<span style="color:var(--brand-primary)"><i class="fas fa-check-circle"></i> All tables accessible</span>'
+            : '<span style="color:var(--brand-danger)"><i class="fas fa-times-circle"></i> Some tables have errors — check details below</span>'}
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:.8rem">
+          <thead>
+            <tr style="color:var(--text-muted);text-align:left">
+              <th style="padding:.3rem .5rem;border-bottom:1px solid var(--border-color)">Table</th>
+              <th style="padding:.3rem .5rem;border-bottom:1px solid var(--border-color)">Status</th>
+              <th style="padding:.3rem .5rem;border-bottom:1px solid var(--border-color)">Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td style="padding:.35rem .5rem;border-bottom:1px solid var(--border-color);font-family:monospace;font-size:.78rem">${r.table}</td>
+                <td style="padding:.35rem .5rem;border-bottom:1px solid var(--border-color)">${r.status}</td>
+                <td style="padding:.35rem .5rem;border-bottom:1px solid var(--border-color);color:${r.status==='✅'?'var(--brand-primary)':'var(--brand-danger)'};font-size:.75rem">${Utils.esc(r.detail)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+        ${!allOk ? `
+        <div style="margin-top:.75rem;padding:.65rem;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;font-size:.78rem">
+          <strong style="color:var(--brand-danger)">⚠️ Fix required:</strong> Run the RLS repair SQL below in your Supabase SQL Editor.
+        </div>
+        <details style="margin-top:.5rem">
+          <summary style="cursor:pointer;font-size:.8rem;font-weight:600;padding:.3rem 0">📋 Click to see RLS Repair SQL</summary>
+          <pre id="rls-fix-sql" style="margin-top:.5rem;background:var(--bg-tertiary);padding:.75rem;border-radius:6px;font-size:.72rem;overflow-x:auto;white-space:pre-wrap;border:1px solid var(--border-color)">${Utils.esc(SettingsPage._rlsFixSQL())}</pre>
+          <button class="btn btn-secondary btn-sm" style="margin-top:.4rem"
+            onclick="navigator.clipboard.writeText(SettingsPage._rlsFixSQL());Toast.success('SQL copied!')">
+            <i class="fas fa-copy"></i> Copy SQL
+          </button>
+        </details>` : ''}
+      </div>`;
+
+    if (resultsEl) {
+      resultsEl.innerHTML = html;
+    } else {
+      // Fallback: show toast
+      if (allOk) Toast.success('All tables accessible!');
+      else Toast.error('Some tables have RLS/access errors — check Settings → Database');
+    }
+  },
+
+  _rlsFixSQL() {
+    const tables = [
+      'users','courses','levels','trainers','trainer_assignments','trainer_sessions',
+      'enrollments','attendance','events','event_registrations','packages',
+      'student_allocations','transactions','notification_rules','notification_logs',
+      'assessments','roles','settings','admin_users','level_schedules'
+    ];
+    return tables.map(t => `
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE tablename='${t}' AND policyname='Authenticated full access ${t}'
+  ) THEN
+    ALTER TABLE IF EXISTS ${t} ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY "Authenticated full access ${t}" ON ${t}
+      FOR ALL USING (auth.role() = 'authenticated') WITH CHECK (auth.role() = 'authenticated');
+  END IF;
+END $$;`).join('\n') + `
+
+-- Also ensure enrollments has schedule_slot column
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS schedule_slot TEXT DEFAULT NULL;
+ALTER TABLE student_allocations ADD COLUMN IF NOT EXISTS notes TEXT;
+`;
   },
 
   backupHTML() {
