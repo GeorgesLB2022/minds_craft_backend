@@ -73,18 +73,55 @@ const UsersPage = {
 
   async loadUsers() {
     try {
+      // ── Fetch ALL users with no FK join (avoids silent row-drops from broken parent_id refs) ──
       const { data, error } = await DB.getAll('users', {
-        select: '*, parent:parent_id(id, full_name)',
+        select: '*',
         order: 'created_at',
         asc: false,
+        limit: 2000,          // explicit high limit — PostgREST default is 1000
       });
-      if (error) throw error;
-      this.allUsers = data || [];
+
+      if (error) {
+        console.error('[Users] Supabase error:', error.code, error.message, error.details, error.hint);
+        const msg = error.message || error.code || 'Unknown Supabase error';
+        Toast.error('Failed to load users: ' + msg);
+        document.getElementById('users-tbody').innerHTML =
+          `<tr><td colspan="7" class="text-center text-muted">
+             <i class="fas fa-exclamation-triangle" style="color:var(--brand-danger)"></i>
+             Supabase error: ${Utils.esc(msg)}
+             <br><small style="font-size:10px;opacity:.7">${Utils.esc(error.hint || error.details || '')}</small>
+           </td></tr>`;
+        return;
+      }
+
+      const allRows = data || [];
+
+      // ── Build parent lookup map in-memory (no FK join needed) ──
+      // Maps parent_id UUID → { id, full_name } using the same dataset
+      const parentMap = {};
+      allRows.forEach(u => { parentMap[u.id] = u; });
+
+      // Attach parent info to each student row client-side
+      this.allUsers = allRows.map(u => {
+        if (u.user_type === 'student' && u.parent_id && parentMap[u.parent_id]) {
+          return {
+            ...u,
+            parent: {
+              id:        parentMap[u.parent_id].id,
+              full_name: parentMap[u.parent_id].full_name,
+            }
+          };
+        }
+        return u;
+      });
+
       this.renderTable();
+
     } catch (err) {
-      console.error(err);
-      Toast.error('Failed to load users');
-      document.getElementById('users-tbody').innerHTML = `<tr><td colspan="7" class="text-center text-muted">Failed to load users</td></tr>`;
+      console.error('[Users] JS exception:', err);
+      Toast.error('Failed to load users: ' + (err.message || err));
+      document.getElementById('users-tbody').innerHTML =
+        `<tr><td colspan="7" class="text-center text-muted">Error: ${Utils.esc(err.message || String(err))}</td></tr>`;
     }
   },
 
@@ -119,7 +156,22 @@ const UsersPage = {
     if (!tbody) return;
 
     const users = this.getFilteredUsers();
-    if (countEl) countEl.textContent = `${users.length} user${users.length !== 1 ? 's' : ''}`;
+
+    // Show count + per-type breakdown when on "All" tab
+    if (countEl) {
+      if (this.currentTab === 'all' && !this.searchQuery) {
+        const counts = { parent: 0, student: 0, staff: 0, admin: 0 };
+        this.allUsers.forEach(u => { if (counts[u.user_type] !== undefined) counts[u.user_type]++; });
+        countEl.innerHTML =
+          `<strong>${this.allUsers.length}</strong> total &nbsp;·&nbsp; ` +
+          `${counts.parent} parent${counts.parent!==1?'s':''} &nbsp;·&nbsp; ` +
+          `${counts.student} student${counts.student!==1?'s':''} &nbsp;·&nbsp; ` +
+          `${counts.staff} staff &nbsp;·&nbsp; ` +
+          `${counts.admin} admin${counts.admin!==1?'s':''}`;
+      } else {
+        countEl.textContent = `${users.length} user${users.length !== 1 ? 's' : ''}`;
+      }
+    }
 
     if (!users.length) {
       tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><i class="fas fa-users"></i><h3>No users found</h3><p>Try a different search or add a new user.</p></div></td></tr>`;
