@@ -311,9 +311,73 @@ Attendance table   ──► student_id + level_id + date + status
 
 ---
 
+## 👨‍👩‍👧 Parent Portal
+
+A separate read-only web app for parents: `parent_portal.html`
+
+### How authentication works
+Parents log in with:
+- **Email** = their email address in `public.users`
+- **Password** = their phone number (e.g. `+96170178043`)
+
+The portal needs a **Supabase Auth account** (in `auth.users`) for each parent — separate from the `public.users` row.
+
+### Auto-registration on first login
+`parent_portal.html` now auto-creates the Supabase Auth account on first login:
+1. Parent enters email + phone number
+2. If Supabase Auth account doesn't exist → `signUp()` is called automatically
+3. On next visit (or after admin confirms the email) → normal `signIn()` succeeds
+
+### Admin tool: create_auth.html
+Open `create_auth.html` to manage parent Auth accounts:
+
+| Method | How | When to use |
+|---|---|---|
+| **A — Auto** (recommended) | `signUp()` via anon key, then confirm SQL | Quickest, no service key needed |
+| **B — SQL** | Direct `INSERT` into `auth.users` | When email confirmation is disabled in Supabase |
+
+After running Method A, run the **Confirm SQL** in Supabase SQL Editor:
+```sql
+UPDATE auth.users
+SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
+    updated_at = NOW()
+WHERE email IN ('isystemslb@gmail.com', 'ritanesbay@gmail.com' /*, ... */);
+```
+
+### Files
+```
+parent_portal.html       Parent-facing portal (login + children/attendance/packages)
+js/parent_portal.js      Portal logic
+create_auth.html         Admin tool to create/confirm parent Auth accounts
+```
+
+---
+
+## 🔧 RLS Fix — If Queries Return 0 Rows
+
+If users, students, or other data doesn't load, run in Supabase SQL Editor:
+
+```sql
+-- Drop all policies on users and recreate cleanly (fixes infinite-recursion bug)
+DROP POLICY IF EXISTS "Authenticated users can do everything" ON public.users;
+DROP POLICY IF EXISTS "authenticated_full_access" ON public.users;
+
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "authenticated_full_access" ON public.users
+  FOR ALL USING (auth.uid() IS NOT NULL)
+  WITH CHECK (auth.uid() IS NOT NULL);
+```
+
+---
+
 ## 🔜 Potential Next Steps
 
-- [ ] Parent-facing portal (separate login, read-only view of their child's attendance & progress)
+- [x] Parent-facing portal — ✅ Done (`parent_portal.html`)
+- [ ] Fix financial-package logic: multi-month packages recorded as lump-sum at renewal dates
+- [ ] Allocation edits create new DB rows to preserve full history
+- [ ] Student-level transaction/allocation log visible in Student Allocations Tab for a specific period
+- [ ] Student name search filter in the Due Packages view
 - [ ] Automated email triggers (absence alerts, expiry reminders via Supabase Edge Functions)
 - [ ] Bulk student import from CSV
 - [ ] Stripe payment integration for online package purchases
