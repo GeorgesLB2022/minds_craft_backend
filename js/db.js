@@ -114,11 +114,11 @@ const DB = {
   // USERS
   // ─────────────────────────────────────────────
   async getUsers(opts = {}) {
-    return this.getAll('users', { order: 'created_at', asc: false, ...opts });
+    return this.getAll('users', { order: 'created_at', asc: false, limit: 2000, ...opts });
   },
 
   async getUsersByType(type) {
-    return this.getAll('users', { filter: { user_type: type }, order: 'full_name' });
+    return this.getAll('users', { filter: { user_type: type }, order: 'full_name', limit: 2000 });
   },
 
   async getParents() {
@@ -126,11 +126,15 @@ const DB = {
   },
 
   async getStudents(opts = {}) {
-    return this.getAll('users', { 
-      select: '*, parent:parent_id(id, full_name, email, phone)',
-      filter: { user_type: 'student' }, 
+    // Use select:'*' only — no FK join on parent_id to avoid silent row-drops
+    // when parent_id references are stale after UID migrations.
+    // Parent info is resolved in-memory by callers if needed.
+    return this.getAll('users', {
+      select: '*',
+      filter: { user_type: 'student' },
       order: 'full_name',
-      ...opts 
+      limit: 2000,
+      ...opts
     });
   },
 
@@ -378,6 +382,45 @@ const DB = {
   async createPackage(data) { return this.insert('packages', data); },
   async updatePackage(id, data) { return this.update('packages', id, data); },
   async deletePackage(id) { return this.remove('packages', id); },
+
+  // ── Package ↔ Course links (package_courses junction table) ──────────────
+
+  // Get all course IDs linked to a specific package
+  async getPackageCourses(packageId) {
+    if (!_supabase) return { data: [], error: null };
+    const { data, error } = await _supabase
+      .from('package_courses')
+      .select('course_id')
+      .eq('package_id', packageId);
+    return { data: (data || []).map(r => r.course_id), error };
+  },
+
+  // Get all package_courses rows (for bulk loading in one query)
+  async getAllPackageCourses() {
+    if (!_supabase) return { data: [], error: null };
+    const { data, error } = await _supabase
+      .from('package_courses')
+      .select('package_id, course_id');
+    return { data: data || [], error };
+  },
+
+  // Replace all course links for a package (delete old, insert new)
+  async setPackageCourses(packageId, courseIds = []) {
+    if (!_supabase) return { error: new Error('Not initialized') };
+    // 1. Delete existing links for this package
+    const { error: delErr } = await _supabase
+      .from('package_courses')
+      .delete()
+      .eq('package_id', packageId);
+    if (delErr) return { error: delErr };
+    // 2. Insert new links (skip if empty)
+    if (!courseIds.length) return { error: null };
+    const rows = courseIds.map(cid => ({ package_id: packageId, course_id: cid }));
+    const { error: insErr } = await _supabase
+      .from('package_courses')
+      .insert(rows);
+    return { error: insErr };
+  },
 
   async getTransactions(opts = {}) {
     return this.getAll('transactions', { order: 'date', asc: false, ...opts });
