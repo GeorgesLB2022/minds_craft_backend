@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Minds' Craft — Parent Portal</title>
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.1/css/all.min.css" />
+  <style>
+    /* ── CSS Variables (reuse same brand) ── */
+    :root {
+      --brand-primary: #22c55e;
+      --brand-primary-dark: #16a34a;
+      --brand-accent: #6366f1;
+      --brand-danger: #ef4444;
+      --brand-warning: #f59e0b;
+      --brand-info: #3b82f6;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --radius-full: 9999px;
+      --transition: 0.2s ease;
+      --font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+    [data-theme="dark"] {
+      --bg: #0f1117;
+      --bg-card: #1d2333;
+      --bg-card2: #242c3e;
+      --bg-input: #242c3e;
+      --text: #f0f4ff;
+      --text-sub: #9ba8c4;
+      --text-muted: #5c6a87;
+      --border: #262f45;
+      --shadow: 0 4px 20px rgba(0,0,0,.35);
+    }
+    [data-theme="light"] {
+      --bg: #f3f5f9;
+      --bg-card: #ffffff;
+      --bg-card2: #f3f5f9;
+      --bg-input: #f3f5f9;
+      --text: #111827;
+      --text-sub: #4b5563;
+      --text-muted: #9ca3af;
+      --border: #e5e7eb;
+      --shadow: 0 4px 20px rgba(0,0,0,.10);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      font-family: var(--font-family);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.9rem;
+      line-height: 1.6;
+      transition: background .3s, color .3s;
+    }
+
+    /* ── SCREENS ── */
+    .screen { display: none; }
+    .screen.active { display: block; }
+
+    /* ── LOGIN ── */
+    #login-screen {
+      min-height: 100vh;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      background: radial-gradient(ellipse at 60% 20%, rgba(34,197,94,.08) 0%, transparent 60%),
+                  radial-gradient(ellipse at 20% 80%, rgba(99,102,241,.07) 0%, transparent 55%),
+                  var(--bg);
+    }
+    #login-screen.active { display: flex; }
+
+    .login-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 2.5rem 2rem;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: var(--shadow);
+    }
+    .login-logo {
+      display: flex; align-items: center; gap: .75rem;
+      margin-bottom: 1.5rem; justify-content: center;
+    }
+    .login-logo img { width: 44px; height: 44px; }
+    .login-logo-text { font-size: 1.2rem; font-weight: 700; color: var(--text); }
+    .login-title { font-size: 1.4rem; font-weight: 700; margin-bottom: .25rem; text-align: center; }
+    .login-sub { color: var(--text-sub); text-align: center; margin-bottom: 1.75rem; font-size: .85rem; }
+
+    .form-group { margin-bottom: 1rem; }
+    .form-label { display: block; font-size: .82rem; font-weight: 500; color: var(--text-sub); margin-bottom: .35rem; }
+    .input-wrap { position: relative; }
+    .input-wrap i.left { position: absolute; left: .75rem; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: .8rem; pointer-events: none; }
+    .form-input {
+      width: 100%; padding: .6rem .85rem .6rem 2.25rem;
+      background: var(--bg-input); border: 1px solid var(--border);
+      border-radius: var(--radius-md); color: var(--text);
+      font-family: var(--font-family); font-size: .875rem;
+      outline: none; transition: border-color var(--transition);
+    }
+    .form-input:focus { border-color: var(--brand-primary); }
+
+    .btn-primary {
+      display: block; width: 100%; padding: .7rem 1rem;
+      background: var(--brand-primary); color: #fff;
+      border: none; border-radius: var(--radius-md);
+      font-family: var(--font-family); font-size: .9rem; font-weight: 600;
+      cursor: pointer; transition: background var(--transition);
+      display: flex; align-items: center; justify-content: center; gap: .5rem;
+    }
+    .btn-primary:hover:not(:disabled) { background: var(--brand-primary-dark); }
+    .btn-primary:disabled { opacity: .55; cursor: not-allowed; }
+
+    .alert-error {
+      background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3);
+      color: #f87171; border-radius: var(--radius-md);
+      padding: .65rem .9rem; font-size: .83rem; margin-bottom: 1rem;
+    }
+    .hidden { display: none !important; }
+
+    /* ── APP SHELL ── */
+    #app-screen { display: none; flex-direction: column; min-height: 100vh; }
+    #app-screen.active { display: flex; }
+
+    /* Topbar */
+    .topbar {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 0 1.25rem;
+      height: 58px;
+      display: flex; align-items: center; justify-content: space-between;
+      position: sticky; top: 0; z-index: 100;
+    }
+    .topbar-brand { display: flex; align-items: center; gap: .6rem; }
+    .topbar-brand img { width: 32px; height: 32px; }
+    .topbar-brand-name { font-weight: 700; font-size: 1rem; }
+    .topbar-brand-sub { font-size: .72rem; color: var(--brand-primary); font-weight: 500; }
+    .topbar-actions { display: flex; align-items: center; gap: .75rem; }
+    .topbar-user { display: flex; align-items: center; gap: .5rem; font-size: .82rem; color: var(--text-sub); }
+    .avatar-sm {
+      width: 32px; height: 32px; border-radius: var(--radius-full);
+      display: flex; align-items: center; justify-content: center;
+      font-size: .8rem; font-weight: 700; color: #fff;
+      background: var(--brand-primary);
+      flex-shrink: 0;
+    }
+    .btn-icon {
+      background: transparent; border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: .4rem .6rem;
+      color: var(--text-sub); cursor: pointer; font-size: .8rem;
+      transition: all var(--transition);
+    }
+    .btn-icon:hover { border-color: var(--brand-primary); color: var(--brand-primary); }
+
+    /* Nav tabs */
+    .nav-tabs {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border);
+      padding: 0 1.25rem;
+      display: flex; gap: .25rem; overflow-x: auto;
+    }
+    .nav-tab {
+      padding: .65rem 1rem; font-size: .83rem; font-weight: 500;
+      color: var(--text-muted); cursor: pointer; white-space: nowrap;
+      border-bottom: 2px solid transparent; transition: all var(--transition);
+      background: none; border-top: none; border-left: none; border-right: none;
+      font-family: var(--font-family);
+    }
+    .nav-tab:hover { color: var(--text); }
+    .nav-tab.active { color: var(--brand-primary); border-bottom-color: var(--brand-primary); }
+    .nav-tab i { margin-right: .4rem; }
+
+    /* Main content */
+    .main-content { flex: 1; padding: 1.5rem 1.25rem; max-width: 900px; width: 100%; margin: 0 auto; }
+
+    /* Section heading */
+    .section-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 1rem; display: flex; align-items: center; gap: .5rem; }
+    .section-title i { color: var(--brand-primary); }
+
+    /* Cards */
+    .card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 1.25rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,.1);
+    }
+    .card + .card { margin-top: 1rem; }
+
+    /* Student card */
+    .student-card {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .student-header { display: flex; align-items: center; gap: .85rem; margin-bottom: 1rem; }
+    .avatar-md {
+      width: 44px; height: 44px; border-radius: var(--radius-full);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1rem; font-weight: 700; color: #fff; flex-shrink: 0;
+    }
+    .student-name { font-weight: 600; font-size: .95rem; }
+    .student-meta { font-size: .78rem; color: var(--text-muted); }
+
+    /* Enrollment chips */
+    .enrollment-list { display: flex; flex-wrap: wrap; gap: .5rem; }
+    .enroll-chip {
+      background: var(--bg-card2); border: 1px solid var(--border);
+      border-radius: var(--radius-full); padding: .3rem .75rem;
+      font-size: .78rem; color: var(--text-sub);
+      display: flex; align-items: center; gap: .4rem;
+    }
+    .enroll-chip i { color: var(--brand-primary); font-size: .7rem; }
+
+    /* Badge */
+    .badge {
+      display: inline-flex; align-items: center; gap: .25rem;
+      padding: .2rem .55rem; border-radius: var(--radius-full);
+      font-size: .72rem; font-weight: 600;
+    }
+    .badge-green { background: rgba(34,197,94,.15); color: #22c55e; }
+    .badge-orange { background: rgba(245,158,11,.15); color: #f59e0b; }
+    .badge-red { background: rgba(239,68,68,.15); color: #ef4444; }
+    .badge-gray { background: rgba(100,100,100,.15); color: var(--text-muted); }
+    .badge-blue { background: rgba(59,130,246,.15); color: #3b82f6; }
+
+    /* Attendance table */
+    .att-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+    .att-table th { padding: .55rem .75rem; text-align: left; color: var(--text-muted); font-weight: 500; font-size: .76rem; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); }
+    .att-table td { padding: .6rem .75rem; border-bottom: 1px solid var(--border); }
+    .att-table tr:last-child td { border-bottom: none; }
+    .att-table tr:hover td { background: var(--bg-card2); }
+
+    /* Package card */
+    .pkg-card {
+      background: var(--bg-card2); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: 1rem 1.1rem;
+      margin-bottom: .75rem;
+    }
+    .pkg-name { font-weight: 600; font-size: .92rem; }
+    .pkg-meta { font-size: .78rem; color: var(--text-muted); margin-top: .25rem; }
+    .pkg-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .5rem; }
+
+    /* Period filter */
+    .filter-row { display: flex; align-items: center; gap: .65rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .filter-input {
+      padding: .45rem .7rem; background: var(--bg-input); border: 1px solid var(--border);
+      border-radius: var(--radius-md); color: var(--text); font-size: .82rem;
+      font-family: var(--font-family); outline: none; transition: border-color var(--transition);
+    }
+    .filter-input:focus { border-color: var(--brand-primary); }
+    .filter-label { font-size: .8rem; color: var(--text-muted); }
+    .btn-sm {
+      padding: .4rem .85rem; background: transparent; border: 1px solid var(--border);
+      border-radius: var(--radius-md); color: var(--text-sub); font-size: .8rem;
+      cursor: pointer; font-family: var(--font-family); transition: all var(--transition);
+    }
+    .btn-sm:hover { border-color: var(--brand-primary); color: var(--brand-primary); }
+
+    /* Student selector */
+    .student-selector {
+      display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.25rem;
+    }
+    .student-btn {
+      padding: .4rem .9rem; border: 1px solid var(--border); border-radius: var(--radius-full);
+      background: var(--bg-card2); color: var(--text-sub); font-size: .8rem;
+      cursor: pointer; font-family: var(--font-family); transition: all var(--transition);
+    }
+    .student-btn:hover { border-color: var(--brand-primary); }
+    .student-btn.active { background: rgba(34,197,94,.15); border-color: var(--brand-primary); color: var(--brand-primary); font-weight: 500; }
+
+    /* Empty state */
+    .empty-state { text-align: center; padding: 2.5rem 1rem; color: var(--text-muted); }
+    .empty-state i { font-size: 2rem; margin-bottom: .75rem; display: block; }
+    .empty-state p { font-size: .85rem; }
+
+    /* Loading */
+    .loading { text-align: center; padding: 2rem; color: var(--text-muted); }
+    .loading i { font-size: 1.5rem; }
+
+    /* Toast */
+    #toast-container { position: fixed; bottom: 1.25rem; right: 1.25rem; z-index: 9999; display: flex; flex-direction: column; gap: .5rem; }
+    .toast {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: .7rem 1rem;
+      font-size: .83rem; box-shadow: var(--shadow);
+      display: flex; align-items: center; gap: .6rem;
+      animation: slideIn .25s ease;
+      max-width: 320px;
+    }
+    .toast.success { border-left: 3px solid var(--brand-primary); }
+    .toast.error { border-left: 3px solid var(--brand-danger); }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
+    /* Spinner */
+    .spin { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Responsive */
+    @media (max-width: 600px) {
+      .main-content { padding: 1rem .85rem; }
+      .login-card { padding: 1.75rem 1.25rem; }
+      .topbar { padding: 0 .85rem; }
+      .nav-tabs { padding: 0 .85rem; }
+    }
+
+    /* Period summary chips */
+    .summary-chips { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1rem; }
+    .chip {
+      background: var(--bg-card2); border: 1px solid var(--border);
+      border-radius: var(--radius-md); padding: .4rem .85rem;
+      font-size: .78rem; color: var(--text-sub);
+    }
+    .chip strong { color: var(--text); }
+  </style>
+</head>
+<body>
+
+<!-- =========================================================
+     LOGIN SCREEN
+     ========================================================= -->
+<div id="login-screen" class="active">
+  <div class="login-card">
+    <div class="login-logo">
+      <img src="assets/logo.svg" alt="Minds' Craft" />
+      <div>
+        <div class="login-logo-text">Minds' Craft</div>
+      </div>
+    </div>
+    <h2 class="login-title">Parent Portal</h2>
+    <p class="login-sub">Track your child's progress & packages</p>
+
+    <div id="login-error" class="alert-error hidden"></div>
+
+    <form id="login-form">
+      <div class="form-group">
+        <label class="form-label">Email Address</label>
+        <div class="input-wrap">
+          <i class="fas fa-envelope left"></i>
+          <input type="email" id="login-email" class="form-input" placeholder="parent@email.com" required autocomplete="email" />
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Password <span style="color:var(--text-muted);font-size:.76rem">(your mobile number)</span></label>
+        <div class="input-wrap">
+          <i class="fas fa-lock left"></i>
+          <input type="password" id="login-password" class="form-input" placeholder="Your mobile number" required autocomplete="current-password" />
+        </div>
+      </div>
+      <button type="submit" class="btn-primary" id="login-btn">
+        <i class="fas fa-sign-in-alt"></i>
+        <span id="login-btn-text">Sign In</span>
+      </button>
+    </form>
+
+    <p style="margin-top:1.25rem;text-align:center;font-size:.76rem;color:var(--text-muted)">
+      Secure Parent Access · Minds' Craft © 2025
+    </p>
+  </div>
+</div>
+
+<!-- =========================================================
+     APP SCREEN
+     ========================================================= -->
+<div id="app-screen">
+
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <img src="assets/logo.svg" alt="Minds' Craft" />
+      <div>
+        <div class="topbar-brand-name">Minds' Craft</div>
+        <div class="topbar-brand-sub">Parent Portal</div>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn-icon" onclick="ParentPortal.toggleTheme()" title="Toggle theme">
+        <i class="fas fa-moon" id="theme-icon"></i>
+      </button>
+      <div class="topbar-user">
+        <div class="avatar-sm" id="topbar-avatar">P</div>
+        <span id="topbar-name">Parent</span>
+      </div>
+      <button class="btn-icon" onclick="ParentPortal.logout()" title="Sign out">
+        <i class="fas fa-sign-out-alt"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- Tabs -->
+  <nav class="nav-tabs">
+    <button class="nav-tab active" data-tab="children" onclick="ParentPortal.showTab('children')">
+      <i class="fas fa-child"></i> My Children
+    </button>
+    <button class="nav-tab" data-tab="attendance" onclick="ParentPortal.showTab('attendance')">
+      <i class="fas fa-calendar-check"></i> Attendance
+    </button>
+    <button class="nav-tab" data-tab="packages" onclick="ParentPortal.showTab('packages')">
+      <i class="fas fa-box"></i> Packages
+    </button>
+  </nav>
+
+  <!-- Main content -->
+  <main class="main-content">
+    <div id="tab-children"></div>
+    <div id="tab-attendance" class="hidden"></div>
+    <div id="tab-packages" class="hidden"></div>
+  </main>
+
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- =========================================================
+     SCRIPTS
+     ========================================================= -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="js/config.js"></script>
+<script src="js/parent_portal.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => ParentPortal.boot());
+</script>
+<script src="https://www.genspark.ai/sandbox_inspect.js"></script></body>
+</html>
