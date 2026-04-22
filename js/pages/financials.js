@@ -8,6 +8,8 @@ const FinancialsPage = {
   transactions: [],
   packages: [],
   allocations: [],
+  courses: [],          // all courses (for package linking)
+  packageCourses: {},   // map: package_id → [course_id, …]
   _allocStudents: [],   // cached for the allocation modal
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -62,14 +64,30 @@ const FinancialsPage = {
   // DATA LOAD  (always refreshes in-memory arrays)
   // ─────────────────────────────────────────────────────────────────────────
   async loadAll() {
-    const [{ data: tx }, { data: pkgs }, { data: alloc }] = await Promise.all([
+    const [
+      { data: tx },
+      { data: pkgs },
+      { data: alloc },
+      { data: courses },
+      { data: pkgCourses },
+    ] = await Promise.all([
       DB.getTransactions({ limit: 500 }),
       DB.getPackages(),
       DB.getStudentAllocations(),
+      DB.getCourses(),
+      DB.getAllPackageCourses(),
     ]);
-    this.transactions = tx    || [];
-    this.packages     = pkgs  || [];
-    this.allocations  = alloc || [];
+    this.transactions = tx      || [];
+    this.packages     = pkgs    || [];
+    this.allocations  = alloc   || [];
+    this.courses      = courses || [];
+
+    // Build packageCourses map: { [package_id]: [course_id, …] }
+    this.packageCourses = {};
+    (pkgCourses || []).forEach(r => {
+      if (!this.packageCourses[r.package_id]) this.packageCourses[r.package_id] = [];
+      this.packageCourses[r.package_id].push(r.course_id);
+    });
   },
 
   // Reload data AND re-render the current tab (used after every mutation)
@@ -730,6 +748,22 @@ const FinancialsPage = {
   },
 
   packageCardHTML(p) {
+    // Linked courses for this package
+    const linkedIds   = this.packageCourses[p.id] || [];
+    const linkedNames = linkedIds
+      .map(cid => this.courses.find(c => c.id === cid))
+      .filter(Boolean)
+      .map(c => c.name);
+
+    const coursePills = linkedNames.length
+      ? linkedNames.map(n =>
+          `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,.12);
+            color:var(--brand-primary);border:1px solid rgba(34,197,94,.25);
+            border-radius:20px;padding:2px 9px;font-size:.72rem;font-weight:600;white-space:nowrap">
+            <i class="fas fa-graduation-cap" style="font-size:.62rem"></i>${Utils.esc(n)}
+          </span>`).join('')
+      : `<span style="font-size:.75rem;color:var(--text-muted);font-style:italic">No courses linked</span>`;
+
     return `
       <div class="package-card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:.8rem">
@@ -743,7 +777,14 @@ const FinancialsPage = {
           ${p.duration_months} month${p.duration_months > 1 ? 's' : ''}
           ${p.default_discount > 0 ? ` · ${p.default_discount}% default discount` : ''}
         </div>
-        ${p.description ? `<p style="font-size:var(--font-size-sm);color:var(--text-muted);margin-bottom:.8rem">${Utils.esc(p.description)}</p>` : ''}
+        ${p.description ? `<p style="font-size:var(--font-size-sm);color:var(--text-muted);margin-bottom:.6rem">${Utils.esc(p.description)}</p>` : ''}
+
+        <div style="margin-bottom:.9rem">
+          <div style="font-size:.72rem;color:var(--text-muted);font-weight:600;text-transform:uppercase;
+            letter-spacing:.04em;margin-bottom:.35rem">Linked Courses</div>
+          <div style="display:flex;flex-wrap:wrap;gap:4px">${coursePills}</div>
+        </div>
+
         <div style="display:flex;gap:6px;margin-top:auto">
           <button class="btn btn-ghost btn-sm" onclick="FinancialsPage.openEditPackage('${p.id}')">
             <i class="fas fa-edit"></i> Edit
@@ -763,6 +804,28 @@ const FinancialsPage = {
   },
 
   packageFormHTML(p) {
+    const linkedIds = p ? (this.packageCourses[p.id] || []) : [];
+
+    // Course checkboxes — one per course in the system
+    const courseCheckboxes = this.courses.length
+      ? this.courses.map(c => {
+          const checked = linkedIds.includes(c.id) ? 'checked' : '';
+          return `
+            <label style="display:flex;align-items:center;gap:8px;padding:7px 10px;
+              background:var(--bg-card2);border-radius:6px;cursor:pointer;
+              border:1px solid var(--border);transition:border-color .15s"
+              onmouseover="this.style.borderColor='var(--brand-primary)'"
+              onmouseout="this.style.borderColor='var(--border)'">
+              <input type="checkbox" name="course_ids" value="${c.id}" ${checked}
+                style="width:15px;height:15px;accent-color:var(--brand-primary);cursor:pointer" />
+              <span style="font-size:.83rem;font-weight:500">${Utils.esc(c.name)}</span>
+              <span style="margin-left:auto;font-size:.72rem;color:var(--text-muted)">
+                ${c.status === 'active' ? '' : '<em>inactive</em>'}
+              </span>
+            </label>`;
+        }).join('')
+      : '<p style="font-size:.8rem;color:var(--text-muted)">No courses found. Create courses first.</p>';
+
     return `
       <form onsubmit="FinancialsPage.savePackage(event, ${p ? `'${p.id}'` : 'null'})">
         <div class="form-group">
@@ -779,21 +842,37 @@ const FinancialsPage = {
             <input type="number" name="base_price" class="form-input" step="0.01" value="${p?.base_price || '0'}" />
           </div>
         </div>
-        <div class="form-group">
-          <label class="form-label">Default Discount (%)</label>
-          <input type="number" name="default_discount" class="form-input" step="0.1" value="${p?.default_discount || '0'}" max="100" />
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Default Discount (%)</label>
+            <input type="number" name="default_discount" class="form-input" step="0.1" value="${p?.default_discount || '0'}" max="100" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Status</label>
+            <select name="status" class="form-select">
+              <option value="active"   ${p?.status==='active'  ?'selected':''}>Active</option>
+              <option value="inactive" ${p?.status==='inactive'?'selected':''}>Inactive</option>
+            </select>
+          </div>
         </div>
         <div class="form-group">
           <label class="form-label">Description</label>
           <textarea name="description" class="form-textarea">${Utils.esc(p?.description || '')}</textarea>
         </div>
+
+        <!-- ── Course Links ── -->
         <div class="form-group">
-          <label class="form-label">Status</label>
-          <select name="status" class="form-select">
-            <option value="active"   ${p?.status==='active'  ?'selected':''}>Active</option>
-            <option value="inactive" ${p?.status==='inactive'?'selected':''}>Inactive</option>
-          </select>
+          <label class="form-label" style="display:flex;align-items:center;gap:6px">
+            <i class="fas fa-graduation-cap" style="color:var(--brand-primary)"></i>
+            Linked Courses
+            <span style="font-size:.72rem;color:var(--text-muted);font-weight:400">(tick all courses this package applies to)</span>
+          </label>
+          <div style="display:flex;flex-direction:column;gap:5px;max-height:180px;
+            overflow-y:auto;padding:2px 0">
+            ${courseCheckboxes}
+          </div>
         </div>
+
         <div class="modal-footer" style="padding:0;border:none;margin-top:1rem">
           <button type="button" class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
           <button type="submit" class="btn btn-primary">
@@ -806,15 +885,39 @@ const FinancialsPage = {
 
   async savePackage(e, id) {
     e.preventDefault();
-    const fd   = new FormData(e.target);
-    const data = Object.fromEntries(fd.entries());
-    data.base_price        = parseFloat(data.base_price)        || 0;
-    data.default_discount  = parseFloat(data.default_discount)  || 0;
-    data.duration_months   = parseInt(data.duration_months)     || 1;
+    const fd = new FormData(e.target);
+
+    // Collect checked course IDs (getAll returns array for multiple checkboxes)
+    const courseIds = fd.getAll('course_ids');  // [] or ['uuid1', 'uuid2', …]
+
+    // Build package data (exclude course_ids — stored in junction table)
+    const data = {
+      name:             fd.get('name'),
+      duration_months:  parseInt(fd.get('duration_months'))    || 1,
+      base_price:       parseFloat(fd.get('base_price'))       || 0,
+      default_discount: parseFloat(fd.get('default_discount')) || 0,
+      status:           fd.get('status') || 'active',
+      description:      fd.get('description') || null,
+    };
     if (!data.description) data.description = null;
+
     try {
+      // 1. Save the package itself
       const result = id ? await DB.updatePackage(id, data) : await DB.createPackage(data);
       if (result.error) throw result.error;
+
+      // 2. Save course links
+      const packageId = id || result.data?.id;
+      if (packageId) {
+        const { error: linkErr } = await DB.setPackageCourses(packageId, courseIds);
+        if (linkErr) {
+          // Non-fatal: package saved but links may have failed (table may not exist yet)
+          console.warn('setPackageCourses error:', linkErr.message);
+          Toast.warning?.('Package saved, but course links failed: ' + linkErr.message +
+            ' — run the migration SQL first.');
+        }
+      }
+
       Toast.success(id ? 'Package updated!' : 'Package created!');
       Modal.close();
       await this._refresh();
