@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Parent Access Check — Minds' Craft</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#f0f4ff;
+       padding:24px;max-width:800px;margin:0 auto;line-height:1.6}
+  h1{color:#22c55e;font-size:1.25rem;margin-bottom:4px}
+  .sub{color:#9ba8c4;font-size:0.8rem;margin-bottom:20px}
+  .card{background:#1d2333;border-radius:10px;padding:20px;border:1px solid #262f45;margin-bottom:14px}
+  .card-title{font-size:0.85rem;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+  label{color:#9ba8c4;font-size:0.75rem;display:block;margin-bottom:3px;margin-top:8px}
+  input{width:100%;background:#242c3e;border:1px solid #262f45;color:#f0f4ff;
+        padding:8px 12px;border-radius:6px;font-family:inherit;font-size:0.8rem;outline:none}
+  input:focus{border-color:#22c55e}
+  .btn{border:none;padding:10px 20px;border-radius:6px;font-size:0.82rem;font-weight:700;
+       cursor:pointer;transition:opacity .2s}
+  .btn:hover{opacity:.85} .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn-green{background:#22c55e;color:#000}
+  .btn-blue{background:#3b82f6;color:#fff}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+
+  /* ── results table ── */
+  .results{margin-top:14px}
+  .parent-row{background:#242c3e;border-radius:8px;padding:14px 16px;
+              margin-bottom:8px;border:1px solid #262f45;display:grid;
+              grid-template-columns:1fr auto;gap:12px;align-items:start}
+  .parent-info .name{font-weight:600;font-size:0.88rem;color:#f0f4ff}
+  .parent-info .email{font-size:0.78rem;color:#9ba8c4;margin-top:2px;font-family:monospace}
+  .parent-info .phone{font-size:0.75rem;color:#9ba8c4;margin-top:2px}
+  .badges{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:flex-end}
+  .pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:9px;
+        font-size:0.72rem;font-weight:600;white-space:nowrap}
+  .pill-green{background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.25)}
+  .pill-red{background:rgba(239,68,68,.15);color:#ef4444;border:1px solid rgba(239,68,68,.25)}
+  .pill-amber{background:rgba(245,158,11,.15);color:#f59e0b;border:1px solid rgba(245,158,11,.25)}
+  .pill-gray{background:rgba(156,163,175,.1);color:#9ba8c4;border:1px solid rgba(156,163,175,.15)}
+  .pill-blue{background:rgba(59,130,246,.15);color:#3b82f6;border:1px solid rgba(59,130,246,.25)}
+
+  .action-row{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap}
+  .btn-sm{border:none;padding:5px 12px;border-radius:5px;font-size:0.73rem;font-weight:700;
+          cursor:pointer;transition:opacity .2s}
+  .btn-sm:hover{opacity:.8} .btn-sm:disabled{opacity:.4;cursor:not-allowed}
+  .btn-sm-green{background:#22c55e;color:#000}
+  .btn-sm-blue{background:#3b82f6;color:#fff}
+  .btn-sm-amber{background:#f59e0b;color:#000}
+
+  .log{background:#0a0d14;border-radius:6px;padding:10px 12px;margin-top:6px;
+       font-size:0.72rem;line-height:1.8;font-family:monospace;
+       border:1px solid #1e2640;min-height:24px}
+  .ok{color:#22c55e} .err{color:#ef4444} .inf{color:#9ba8c4} .warn{color:#f59e0b}
+
+  .summary-bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+  .sum-chip{background:#242c3e;border-radius:7px;padding:10px 16px;text-align:center;
+            border:1px solid #262f45;flex:1;min-width:100px}
+  .sum-chip .num{font-size:1.4rem;font-weight:800;color:#f0f4ff}
+  .sum-chip .lbl{font-size:0.72rem;color:#9ba8c4;margin-top:2px}
+  .sum-chip.green .num{color:#22c55e}
+  .sum-chip.red .num{color:#ef4444}
+  .sum-chip.amber .num{color:#f59e0b}
+
+  .spin{display:inline-block;animation:spin 1s linear infinite;margin-right:4px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .progress-bar{height:3px;background:#262f45;border-radius:9px;margin:10px 0;overflow:hidden}
+  .progress-fill{height:100%;background:#22c55e;transition:width .3s;width:0}
+
+  .sql-box{background:#0a0d14;border:1px solid #1e2640;border-radius:6px;padding:10px 12px;
+           font-size:0.7rem;white-space:pre-wrap;color:#c5cfdf;max-height:180px;
+           overflow-y:auto;font-family:monospace;margin-top:6px}
+  .copy-btn{background:#3b82f6;color:#fff;border:none;padding:4px 12px;border-radius:5px;
+            cursor:pointer;font-size:0.72rem;font-weight:700;margin-top:4px}
+  .warn-box{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);
+            border-radius:8px;padding:10px 12px;font-size:0.78rem;color:#fde68a;margin-top:8px}
+  a{color:#22c55e}
+</style>
+</head>
+<body>
+
+<h1>🔍 Parent Access Check</h1>
+<p class="sub">Verify which parents can log in to the portal. Diagnoses Auth account status + UID match + profile.</p>
+
+<!-- ADMIN LOGIN -->
+<div class="card">
+  <div class="card-title">🔐 Admin Login</div>
+  <label>Admin Email</label>
+  <input id="adm-email" value="minds.craft.lb@gmail.com" autocomplete="email"/>
+  <label>Admin Password</label>
+  <input id="adm-pw" type="password" placeholder="Admin password" autocomplete="current-password"/>
+  <div class="row">
+    <button class="btn btn-green" id="run-btn" onclick="runCheck()">
+      ▶ Check All Parents
+    </button>
+  </div>
+  <div id="main-log" class="log" style="display:none"></div>
+</div>
+
+<!-- PROGRESS -->
+<div id="progress-wrap" style="display:none">
+  <div class="progress-bar"><div class="progress-fill" id="prog-fill"></div></div>
+</div>
+
+<!-- SUMMARY -->
+<div id="summary-wrap" style="display:none">
+  <div class="summary-bar">
+    <div class="sum-chip green"><div class="num" id="sum-ok">0</div><div class="lbl">✅ Can Login</div></div>
+    <div class="sum-chip amber"><div class="num" id="sum-noconfirm">0</div><div class="lbl">⚠️ Not Confirmed</div></div>
+    <div class="sum-chip red"><div class="num" id="sum-noauth">0</div><div class="lbl">❌ No Auth Account</div></div>
+    <div class="sum-chip"><div class="num" id="sum-total">0</div><div class="lbl">Total Parents</div></div>
+  </div>
+</div>
+
+<!-- RESULTS -->
+<div id="results" class="results"></div>
+
+<!-- SQL FIX SECTION -->
+<div id="fix-section" style="display:none" class="card">
+  <div class="card-title">🛠 Fix — Run This SQL in Supabase</div>
+  <div class="warn-box">
+    Copy the SQL below → open
+    <a href="https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new" target="_blank">Supabase SQL Editor ↗</a>
+    → Paste → Run → come back and re-check.
+  </div>
+  <div class="sql-box" id="fix-sql-text"></div>
+  <button class="copy-btn" onclick="copySql()">📋 Copy SQL</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+const SB_URL  = 'https://xiatsareoruybucwkpkc.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpYXRzYXJlb3J1eWJ1Y3drcGtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjgzOTcsImV4cCI6MjA4OTk0NDM5N30.l14cNOUt1PKqL0hl5VL5wpt2JRB9rG_gQlJeYeJNIqU';
+
+let _allResults = [];
+
+function log(msg, cls='inf') {
+  const el = document.getElementById('main-log');
+  el.style.display = 'block';
+  el.innerHTML += `<div class="${cls}">${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setProgress(pct) {
+  document.getElementById('progress-wrap').style.display = 'block';
+  document.getElementById('prog-fill').style.width = pct + '%';
+}
+
+async function runCheck() {
+  // Reset UI
+  document.getElementById('main-log').innerHTML = '';
+  document.getElementById('results').innerHTML = '';
+  document.getElementById('summary-wrap').style.display = 'none';
+  document.getElementById('fix-section').style.display = 'none';
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('run-btn').textContent = '⏳ Checking…';
+  setProgress(5);
+  _allResults = [];
+
+  const adminEmail = document.getElementById('adm-email').value.trim();
+  const adminPw    = document.getElementById('adm-pw').value.trim();
+
+  if (!adminPw) { log('❌ Enter admin password.', 'err'); resetBtn(); return; }
+
+  // ── Step 1: Admin sign in ──
+  log(`Signing in as ${adminEmail}…`, 'inf');
+  const sb = supabase.createClient(SB_URL, SB_ANON);
+  const { data: authData, error: authErr } = await sb.auth.signInWithPassword({
+    email: adminEmail, password: adminPw
+  });
+  if (authErr) { log('❌ Admin login failed: ' + authErr.message, 'err'); resetBtn(); return; }
+  log('✅ Admin signed in.', 'ok');
+  setProgress(15);
+
+  // ── Step 2: Fetch all parents ──
+  log('Loading all parents from public.users…', 'inf');
+  const { data: parents, error: parentsErr } = await sb.from('users')
+    .select('id, full_name, email, phone, user_type, status, created_at')
+    .eq('user_type', 'parent')
+    .order('full_name');
+
+  await sb.auth.signOut();
+
+  if (parentsErr) { log('❌ ' + parentsErr.message, 'err'); resetBtn(); return; }
+  if (!parents?.length) { log('⚠️ No parents found in public.users.', 'warn'); resetBtn(); return; }
+
+  log(`Found ${parents.length} parent(s). Testing each one…`, 'ok');
+  setProgress(25);
+
+  // ── Step 3: Test each parent by attempting signInWithPassword ──
+  // We test with their phone number as password (both with and without +961 prefix)
+  const anonSb = supabase.createClient(SB_URL, SB_ANON);
+  const results = [];
+
+  for (let i = 0; i < parents.length; i++) {
+    const p = parents[i];
+    setProgress(25 + Math.round((i / parents.length) * 70));
+
+    const result = {
+      ...p,
+      authStatus: 'unknown',   // 'ok' | 'wrong_pw' | 'not_confirmed' | 'no_account' | 'no_data'
+      workingPw: null,
+      authUid: null,
+      uidMatch: null,
+      detail: ''
+    };
+
+    if (!p.email || !p.phone) {
+      result.authStatus = 'no_data';
+      result.detail = 'Missing email or phone';
+      results.push(result);
+      continue;
+    }
+
+    // Build password variants to try
+    const pwVariants = [p.phone];
+    if (p.phone.startsWith('+')) {
+      pwVariants.push(p.phone.slice(1));              // without +
+      if (p.phone.startsWith('+961')) {
+        pwVariants.push(p.phone.replace('+961','0')); // Lebanese local format
+        pwVariants.push(p.phone.slice(4));            // without country code
+      }
+    } else {
+      pwVariants.push('+' + p.phone);                 // with +
+    }
+
+    let loginOk = false;
+    for (const pw of pwVariants) {
+      const { data: loginData, error: loginErr } = await anonSb.auth.signInWithPassword({
+        email: p.email, password: pw
+      });
+
+      if (!loginErr && loginData?.user) {
+        // ✅ Login works
+        result.authStatus = 'ok';
+        result.workingPw  = pw;
+        result.authUid    = loginData.user.id;
+        result.uidMatch   = (loginData.user.id === p.id);
+        loginOk = true;
+        await anonSb.auth.signOut();
+        break;
+      } else if (loginErr) {
+        const em = loginErr.message.toLowerCase();
+        if (em.includes('confirm') || em.includes('verify') || em.includes('not confirmed')) {
+          result.authStatus = 'not_confirmed';
+          result.detail = loginErr.message;
+          break; // no point trying other passwords
+        }
+        if (em.includes('invalid') || em.includes('credentials')) {
+          result.authStatus = 'wrong_pw'; // may update to no_account after all variants fail
+        }
+      }
+    }
+
+    // If all password variants failed with "invalid credentials", the account likely doesn't exist
+    if (!loginOk && result.authStatus === 'wrong_pw') {
+      // Try signUp to detect "already registered"
+      const { error: suErr } = await anonSb.auth.signUp({
+        email: p.email,
+        password: '__probe_check_' + Math.random().toString(36).slice(2)
+      });
+      if (!suErr) {
+        // signUp succeeded → account did NOT exist (we just created a ghost account, will be cleaned up)
+        result.authStatus = 'no_account';
+        result.detail = 'No Auth account found — needs to be created';
+        // Sign out the ghost account
+        await anonSb.auth.signOut();
+      } else if (suErr.message.toLowerCase().includes('already') || suErr.message.toLowerCase().includes('registered')) {
+        result.authStatus = 'wrong_pw';
+        result.detail = 'Auth account exists but password does not match stored phone';
+      } else {
+        result.authStatus = 'wrong_pw';
+        result.detail = suErr.message;
+      }
+    }
+
+    results.push(result);
+    await new Promise(r => setTimeout(r, 200)); // avoid rate limiting
+  }
+
+  setProgress(100);
+  _allResults = results;
+  renderResults(results);
+  resetBtn();
+}
+
+function renderResults(results) {
+  const ok         = results.filter(r => r.authStatus === 'ok');
+  const noConfirm  = results.filter(r => r.authStatus === 'not_confirmed');
+  const noAccount  = results.filter(r => r.authStatus === 'no_account');
+  const wrongPw    = results.filter(r => r.authStatus === 'wrong_pw');
+  const noData     = results.filter(r => r.authStatus === 'no_data');
+
+  // Summary chips
+  document.getElementById('sum-ok').textContent       = ok.length;
+  document.getElementById('sum-noconfirm').textContent = noConfirm.length + wrongPw.length;
+  document.getElementById('sum-noauth').textContent    = noAccount.length;
+  document.getElementById('sum-total').textContent     = results.length;
+  document.getElementById('summary-wrap').style.display = 'block';
+
+  // Sort: problems first
+  const sorted = [
+    ...noAccount,
+    ...noConfirm,
+    ...wrongPw,
+    ...noData,
+    ...ok,
+  ];
+
+  const container = document.getElementById('results');
+  container.innerHTML = sorted.map(r => buildCard(r)).join('');
+
+  // Generate fix SQL
+  const needFix = [...noAccount, ...noConfirm, ...wrongPw].filter(r => r.email && r.phone);
+  if (needFix.length > 0) buildFixSQL(needFix);
+
+  log(`\nDone. ✅ ${ok.length} can log in | ⚠️ ${noConfirm.length + wrongPw.length} issues | ❌ ${noAccount.length} missing auth accounts`, 'ok');
+}
+
+function buildCard(r) {
+  let statusPill = '';
+  let detail = '';
+  let actions = '';
+
+  if (r.authStatus === 'ok') {
+    statusPill = `<span class="pill pill-green">✅ Can login</span>`;
+    if (r.workingPw && r.workingPw !== r.phone) {
+      statusPill += ` <span class="pill pill-amber">⚠️ pw differs: <code>${r.workingPw}</code></span>`;
+    }
+    if (r.uidMatch === false) {
+      statusPill += ` <span class="pill pill-amber">⚠️ UID mismatch</span>`;
+      detail = `Auth UID differs from public.users.id — portal may not load profile.`;
+    } else if (r.uidMatch === true) {
+      statusPill += ` <span class="pill pill-green">✅ UID match</span>`;
+    }
+  } else if (r.authStatus === 'not_confirmed') {
+    statusPill = `<span class="pill pill-amber">⚠️ Not confirmed</span>`;
+    detail = 'Auth account exists but email not confirmed.';
+    actions = `<button class="btn-sm btn-sm-amber" onclick="fixSingle('${r.email}','${(r.phone||'').replace(/'/g,"\\'")}')">🛠 Fix this parent</button>`;
+  } else if (r.authStatus === 'wrong_pw') {
+    statusPill = `<span class="pill pill-amber">⚠️ Auth exists, wrong password</span>`;
+    detail = 'Auth account exists but none of the phone number formats matched.';
+    actions = `<button class="btn-sm btn-sm-amber" onclick="fixSingle('${r.email}','${(r.phone||'').replace(/'/g,"\\'")}')">🔑 Reset password</button>`;
+  } else if (r.authStatus === 'no_account') {
+    statusPill = `<span class="pill pill-red">❌ No Auth account</span>`;
+    detail = 'Needs to be created in Supabase Auth.';
+    actions = `<button class="btn-sm btn-sm-green" onclick="createSingle('${r.email}','${(r.phone||'').replace(/'/g,"\\'")}','${r.id}','${(r.full_name||'').replace(/'/g,"\\'")}')">➕ Auto-create now</button>
+               <button class="btn-sm btn-sm-amber" onclick="fixSingle('${r.email}','${(r.phone||'').replace(/'/g,"\\'")}')">📋 SQL fix</button>`;
+  } else if (r.authStatus === 'no_data') {
+    statusPill = `<span class="pill pill-gray">⚠️ Missing email/phone</span>`;
+    detail = r.detail;
+  }
+
+  return `
+  <div class="parent-row" id="row-${r.id}">
+    <div class="parent-info">
+      <div class="name">${esc(r.full_name || '—')}</div>
+      <div class="email">📧 ${esc(r.email || '—')}</div>
+      <div class="phone">📱 ${esc(r.phone || '—')}</div>
+      ${detail ? `<div style="font-size:0.72rem;color:#9ba8c4;margin-top:4px">${detail}</div>` : ''}
+      ${actions ? `<div class="action-row">${actions}</div>` : ''}
+      <div id="log-${r.id}" class="log" style="display:none"></div>
+    </div>
+    <div class="badges">${statusPill}</div>
+  </div>`;
+}
+
+// ── Create single auth account via signUp ──
+async function createSingle(email, phone, pubId, fullName) {
+  const logEl = document.getElementById(`log-${pubId}`);
+  logEl.style.display = 'block';
+  logEl.innerHTML = `<span class="inf">Creating auth account…</span>`;
+
+  const sb = supabase.createClient(SB_URL, SB_ANON);
+  const { data, error } = await sb.auth.signUp({
+    email,
+    password: phone,
+    options: { data: { user_type: 'parent', full_name: fullName, public_user_id: pubId } }
+  });
+
+  if (error) {
+    if (error.message.toLowerCase().includes('already') || error.message.toLowerCase().includes('registered')) {
+      logEl.innerHTML = `<div class="warn">⚠️ Auth account already exists — try "Reset password" SQL instead.</div>`;
+    } else {
+      logEl.innerHTML = `<div class="err">❌ ${error.message}</div>`;
+    }
+    return;
+  }
+
+  const authUid = data?.user?.id;
+  const confirmed = data?.user?.email_confirmed_at;
+  logEl.innerHTML = `<div class="ok">✅ Auth account created! (uid: ${authUid?.slice(0,8)}…)</div>`;
+
+  if (!confirmed) {
+    logEl.innerHTML += `<div class="warn">⚠️ Email not confirmed — run the fix SQL to confirm.</div>`;
+  } else {
+    logEl.innerHTML += `<div class="ok">✅ Email auto-confirmed!</div>`;
+  }
+
+  // Test login immediately
+  await new Promise(r => setTimeout(r, 500));
+  logEl.innerHTML += `<div class="inf">Testing login…</div>`;
+  const { data: d2, error: e2 } = await sb.auth.signInWithPassword({ email, password: phone });
+  if (e2) {
+    logEl.innerHTML += `<div class="warn">⚠️ Login test failed: ${e2.message} — confirm email then retry.</div>`;
+  } else {
+    await sb.auth.signOut();
+    logEl.innerHTML += `<div class="ok">✅ Login works! <a href="parent_portal.html" target="_blank">Open portal →</a></div>`;
+  }
+}
+
+// ── Show SQL fix for a single parent ──
+function fixSingle(email, phone) {
+  const em = email.replace(/'/g, "''");
+  const pw = phone.replace(/'/g, "''");
+
+  const sql = `-- Fix for: ${email}
+DO $$
+DECLARE v_auth UUID; v_pub UUID;
+BEGIN
+  -- Get auth UID and current public.users id
+  SELECT id INTO v_auth FROM auth.users WHERE email = '${em}' LIMIT 1;
+  SELECT id INTO v_pub  FROM public.users WHERE email = '${em}' LIMIT 1;
+  IF v_auth IS NOT NULL THEN
+    -- Update password + confirm
+    UPDATE auth.users
+    SET encrypted_password = crypt('${pw}', gen_salt('bf')),
+        email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
+        updated_at = NOW()
+    WHERE email = '${em}';
+    -- Sync UID if mismatch (bypass FK with replication role)
+    IF v_pub IS NOT NULL AND v_auth <> v_pub THEN
+      SET session_replication_role = replica;
+      UPDATE public.users SET id        = v_auth WHERE id        = v_pub;
+      UPDATE public.users SET parent_id = v_auth WHERE parent_id = v_pub;
+      SET session_replication_role = DEFAULT;
+    END IF;
+    RAISE NOTICE 'Fixed ${email}';
+  ELSE
+    -- No auth account — create one
+    INSERT INTO auth.users (
+      id, instance_id, email, encrypted_password,
+      email_confirmed_at, created_at, updated_at,
+      raw_app_meta_data, raw_user_meta_data, is_super_admin, role, aud
+    )
+    SELECT
+      u.id, '00000000-0000-0000-0000-000000000000',
+      '${em}', crypt('${pw}', gen_salt('bf')),
+      NOW(), NOW(), NOW(),
+      '{"provider":"email","providers":["email"]}',
+      '{"user_type":"parent"}',
+      false, 'authenticated', 'authenticated'
+    FROM public.users u WHERE u.email = '${em}' LIMIT 1;
+
+    INSERT INTO auth.identities (id, user_id, provider_id, provider, identity_data, created_at, updated_at, last_sign_in_at)
+    SELECT gen_random_uuid(), u.id, '${em}', 'email',
+           jsonb_build_object('sub', u.id::text, 'email', '${em}'),
+           NOW(), NOW(), NOW()
+    FROM public.users u WHERE u.email = '${em}' LIMIT 1
+    ON CONFLICT DO NOTHING;
+    RAISE NOTICE 'Created auth account for ${email}';
+  END IF;
+END $$;
+
+-- Verify
+SELECT u.full_name, u.email, a.email_confirmed_at IS NOT NULL AS confirmed,
+       CASE WHEN u.id = a.id THEN '✅ match' ELSE '❌ mismatch' END AS uid_status
+FROM public.users u
+LEFT JOIN auth.users a ON a.email = u.email
+WHERE u.email = '${em}';`;
+
+  document.getElementById('fix-sql-text').textContent = sql;
+  document.getElementById('fix-section').style.display = 'block';
+  document.getElementById('fix-section').scrollIntoView({ behavior: 'smooth' });
+}
+
+// ── Build bulk fix SQL for all problem parents ──
+function buildFixSQL(parents) {
+  const emails = parents.map(p => `'${p.email.replace(/'/g,"''")}'`).join(',\n    ');
+
+  let sql = `-- ═══════════════════════════════════════════════════════
+-- Fix ALL parent auth accounts — Minds' Craft
+-- Run in: https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new
+-- ═══════════════════════════════════════════════════════
+
+-- Step 1: Confirm all parent emails
+UPDATE auth.users
+SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
+    updated_at = NOW()
+WHERE email IN (
+    ${emails}
+);
+
+-- Step 2: Create missing accounts + reset passwords
+`;
+
+  parents.forEach(p => {
+    const em = (p.email || '').replace(/'/g, "''");
+    const pw = (p.phone || '').replace(/'/g, "''");
+    const nm = (p.full_name || '').replace(/'/g, "''");
+    const uid = p.id;
+
+    sql += `
+DO $$
+DECLARE v_auth UUID;
+BEGIN
+  SELECT id INTO v_auth FROM auth.users WHERE email = '${em}' LIMIT 1;
+  IF v_auth IS NULL THEN
+    INSERT INTO auth.users (
+      id, instance_id, email, encrypted_password, email_confirmed_at,
+      created_at, updated_at, raw_app_meta_data, raw_user_meta_data,
+      is_super_admin, role, aud
+    ) VALUES (
+      '${uid}', '00000000-0000-0000-0000-000000000000',
+      '${em}', crypt('${pw}', gen_salt('bf')), NOW(), NOW(), NOW(),
+      '{"provider":"email","providers":["email"]}',
+      '{"user_type":"parent","full_name":"${nm}"}',
+      false, 'authenticated', 'authenticated'
+    );
+    INSERT INTO auth.identities (id, user_id, provider_id, provider, identity_data, created_at, updated_at, last_sign_in_at)
+    VALUES (gen_random_uuid(), '${uid}', '${em}', 'email',
+            jsonb_build_object('sub','${uid}','email','${em}'), NOW(), NOW(), NOW())
+    ON CONFLICT DO NOTHING;
+    RAISE NOTICE 'CREATED auth for ${p.email}';
+  ELSE
+    UPDATE auth.users
+    SET encrypted_password = crypt('${pw}', gen_salt('bf')),
+        email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
+        updated_at = NOW()
+    WHERE email = '${em}';
+    IF v_auth <> '${uid}' THEN
+      SET session_replication_role = replica;
+      UPDATE public.users SET id        = v_auth WHERE id        = '${uid}';
+      UPDATE public.users SET parent_id = v_auth WHERE parent_id = '${uid}';
+      SET session_replication_role = DEFAULT;
+    END IF;
+    RAISE NOTICE 'UPDATED auth for ${p.email}';
+  END IF;
+END $$;
+`;
+  });
+
+  sql += `
+-- Step 3: Verify all parents
+SELECT u.full_name, u.email, u.phone,
+       a.email_confirmed_at IS NOT NULL AS confirmed,
+       CASE WHEN u.id = a.id THEN '✅ match' ELSE '❌ mismatch' END AS uid_status
+FROM public.users u
+LEFT JOIN auth.users a ON a.email = u.email
+WHERE u.user_type = 'parent'
+ORDER BY u.full_name;`;
+
+  document.getElementById('fix-sql-text').textContent = sql;
+  document.getElementById('fix-section').style.display = 'block';
+}
+
+function copySql() {
+  const txt = document.getElementById('fix-sql-text').textContent;
+  navigator.clipboard.writeText(txt)
+    .then(() => alert('✅ SQL copied!\n\nPaste at:\nhttps://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new\n\nThen click RUN.'))
+    .catch(() => alert('Select all text in the SQL box manually and copy (Ctrl+A, Ctrl+C).'));
+}
+
+function resetBtn() {
+  const btn = document.getElementById('run-btn');
+  btn.disabled = false;
+  btn.textContent = '▶ Check All Parents';
+}
+
+function esc(str) {
+  return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+</script>
+<script src="https://www.genspark.ai/sandbox_inspect.js"></script></body>
+</html>
