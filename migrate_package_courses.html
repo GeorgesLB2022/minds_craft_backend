@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Migration — Package Courses — Minds' Craft</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:#0f1117;color:#f0f4ff;
+       padding:24px;max-width:740px;margin:0 auto;line-height:1.6}
+  h1{color:#22c55e;font-size:1.2rem;margin-bottom:4px}
+  .sub{color:#9ba8c4;font-size:.8rem;margin-bottom:20px}
+  .card{background:#1d2333;border-radius:10px;padding:20px;border:1px solid #262f45;margin-bottom:14px}
+  .card-title{font-size:.88rem;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+  .badge{width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;
+         justify-content:center;font-size:11px;font-weight:700;flex-shrink:0}
+  .b-green{background:#22c55e;color:#000}
+  .b-blue{background:#3b82f6;color:#fff}
+  .info-box{background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.2);
+            border-radius:8px;padding:12px;font-size:.8rem;color:#a7f3d0;margin-bottom:10px}
+  .warn-box{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);
+            border-radius:8px;padding:12px;font-size:.8rem;color:#fde68a;margin-bottom:10px}
+  .sql-wrap{position:relative;margin-top:8px}
+  .sql-box{background:#0a0d14;border:1px solid #1e2640;border-radius:6px;padding:14px;
+           font-size:.72rem;white-space:pre;overflow-x:auto;color:#c5cfdf;
+           font-family:'Courier New',monospace;line-height:1.85;max-height:360px;overflow-y:auto}
+  .copy-btn{position:absolute;top:8px;right:8px;background:#22c55e;color:#000;
+            border:none;padding:5px 14px;border-radius:5px;cursor:pointer;font-size:.73rem;font-weight:700}
+  .copy-btn:hover{opacity:.85}
+  a{color:#22c55e;font-weight:600}
+  label{color:#9ba8c4;font-size:.75rem;display:block;margin-bottom:3px;margin-top:10px}
+  input{width:100%;background:#242c3e;border:1px solid #262f45;color:#f0f4ff;
+        padding:8px 12px;border-radius:6px;font-family:inherit;font-size:.8rem;outline:none}
+  input:focus{border-color:#22c55e}
+  .btn{border:none;padding:9px 20px;border-radius:6px;font-size:.82rem;font-weight:700;cursor:pointer;width:100%;margin-top:10px}
+  .btn-green{background:#22c55e;color:#000}
+  .btn:hover{opacity:.85} .btn:disabled{opacity:.4;cursor:not-allowed}
+  .log{background:#0a0d14;border-radius:6px;padding:10px 12px;margin-top:8px;
+       font-size:.75rem;line-height:1.9;font-family:monospace;border:1px solid #1e2640;min-height:36px}
+  .ok{color:#22c55e}.err{color:#ef4444}.inf{color:#9ba8c4}.warn{color:#f59e0b}
+  .step{display:flex;gap:10px;align-items:flex-start;font-size:.82rem;margin-bottom:8px;color:#9ba8c4}
+  .step strong{color:#f0f4ff}
+  code{background:#242c3e;padding:1px 5px;border-radius:4px;font-size:.78rem;font-family:monospace}
+</style>
+</head>
+<body>
+
+<h1>🗃 Migration: Package ↔ Course Links</h1>
+<p class="sub">One-time setup to enable linking packages to their applicable courses.</p>
+
+<!-- WHAT THIS DOES -->
+<div class="card">
+  <div class="card-title">📋 What this creates</div>
+  <div class="step"><span>→</span><span>A new junction table <code>package_courses</code> (<code>package_id</code> + <code>course_id</code>) with a unique constraint so no duplicate links can exist.</span></div>
+  <div class="step"><span>→</span><span>Row-Level Security enabled with a policy so authenticated admins can read and write course links.</span></div>
+  <div class="step"><span>→</span><span>Indexes for fast lookup by package or by course.</span></div>
+  <div class="info-box">✅ Safe to run multiple times — uses <code>CREATE TABLE IF NOT EXISTS</code> and <code>CREATE POLICY IF NOT EXISTS</code>.</div>
+</div>
+
+<!-- SQL -->
+<div class="card">
+  <div class="card-title"><span class="badge b-green">1</span> Run this SQL in Supabase</div>
+  <div class="warn-box">
+    Open <a href="https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new" target="_blank">Supabase SQL Editor ↗</a>
+    → paste → click <strong>Run</strong>
+  </div>
+  <div class="sql-wrap">
+    <pre class="sql-box" id="migration-sql">-- ════════════════════════════════════════════════════════════
+-- MIGRATION: package_courses junction table
+-- Minds' Craft — links packages to the courses they apply to
+-- Safe to run multiple times (idempotent)
+-- ════════════════════════════════════════════════════════════
+
+-- 1. Create the junction table
+CREATE TABLE IF NOT EXISTS package_courses (
+  id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  package_id  UUID NOT NULL REFERENCES packages(id)  ON DELETE CASCADE,
+  course_id   UUID NOT NULL REFERENCES courses(id)   ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE (package_id, course_id)   -- no duplicate links
+);
+
+-- 2. Indexes for fast lookups
+CREATE INDEX IF NOT EXISTS idx_pkg_courses_package ON package_courses(package_id);
+CREATE INDEX IF NOT EXISTS idx_pkg_courses_course  ON package_courses(course_id);
+
+-- 3. Enable Row-Level Security
+ALTER TABLE package_courses ENABLE ROW LEVEL SECURITY;
+
+-- 4. Policy: authenticated users have full access
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'package_courses'
+      AND policyname = 'authenticated_full_access'
+  ) THEN
+    CREATE POLICY "authenticated_full_access" ON package_courses
+      FOR ALL
+      USING  (auth.uid() IS NOT NULL)
+      WITH CHECK (auth.uid() IS NOT NULL);
+  END IF;
+END $$;
+
+-- 5. Verify
+SELECT 'package_courses table ready ✅' AS status;
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'package_courses'
+ORDER BY ordinal_position;
+</pre>
+    <button class="copy-btn" onclick="copySql()">📋 Copy</button>
+  </div>
+</div>
+
+<!-- VERIFY -->
+<div class="card">
+  <div class="card-title"><span class="badge b-blue">2</span> Verify the table exists</div>
+  <label>Admin Email</label>
+  <input id="adm-email" value="minds.craft.lb@gmail.com" autocomplete="email"/>
+  <label>Admin Password</label>
+  <input id="adm-pw" type="password" placeholder="Admin password" autocomplete="current-password"/>
+  <button class="btn btn-green" onclick="verify()">▶ Test Connection to package_courses</button>
+  <div class="log" id="verify-log"><span class="inf">Run the SQL first, then click Verify.</span></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+const SB_URL  = 'https://xiatsareoruybucwkpkc.supabase.co';
+const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpYXRzYXJlb3J1eWJ1Y3drcGtjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQzNjgzOTcsImV4cCI6MjA4OTk0NDM5N30.l14cNOUt1PKqL0hl5VL5wpt2JRB9rG_gQlJeYeJNIqU';
+
+function log(msg, cls='inf') {
+  const el = document.getElementById('verify-log');
+  if (el.innerHTML.includes('Run the SQL')) el.innerHTML = '';
+  el.innerHTML += `<div class="${cls}">${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function copySql() {
+  const txt = document.getElementById('migration-sql').textContent;
+  navigator.clipboard.writeText(txt)
+    .then(() => alert('✅ SQL copied!\n\nPaste at:\nhttps://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new\n\nThen click RUN.'))
+    .catch(() => alert('Select all text and copy manually (Ctrl+A, Ctrl+C).'));
+}
+
+async function verify() {
+  document.getElementById('verify-log').innerHTML = '';
+  const email = document.getElementById('adm-email').value.trim();
+  const pw    = document.getElementById('adm-pw').value.trim();
+  if (!pw) { log('❌ Enter admin password.', 'err'); return; }
+
+  log('Signing in…', 'inf');
+  const sb = supabase.createClient(SB_URL, SB_ANON);
+  const { error: authErr } = await sb.auth.signInWithPassword({ email, password: pw });
+  if (authErr) { log('❌ Login failed: ' + authErr.message, 'err'); return; }
+  log('✅ Signed in.', 'ok');
+
+  // Test 1: Can we read package_courses?
+  log('Testing package_courses table…', 'inf');
+  const { data: rows, error: tblErr } = await sb.from('package_courses').select('*').limit(1);
+  if (tblErr) {
+    if (tblErr.message.includes('does not exist') || tblErr.code === '42P01') {
+      log('❌ Table does not exist — run the SQL above first!', 'err');
+    } else {
+      log('❌ Error: ' + tblErr.message, 'err');
+    }
+    await sb.auth.signOut();
+    return;
+  }
+  log('✅ package_courses table exists and is readable.', 'ok');
+  log(`   Current rows: ${rows.length} link(s) stored.`, 'ok');
+
+  // Test 2: Packages
+  const { data: pkgs } = await sb.from('packages').select('id, name').order('name');
+  log(`✅ packages table: ${pkgs?.length || 0} package(s) found.`, 'ok');
+
+  // Test 3: Courses
+  const { data: courses } = await sb.from('courses').select('id, name').order('name');
+  log(`✅ courses table: ${courses?.length || 0} course(s) found.`, 'ok');
+
+  await sb.auth.signOut();
+
+  log('', 'inf');
+  log('🎉 Migration complete! You can now:', 'ok');
+  log('   → Go to Financials → Packages tab', 'ok');
+  log('   → Click "Create Package" or "Edit" on any package', 'ok');
+  log('   → Tick the courses this package applies to', 'ok');
+}
+</script>
+<script src="https://www.genspark.ai/sandbox_inspect.js"></script></body>
+</html>
