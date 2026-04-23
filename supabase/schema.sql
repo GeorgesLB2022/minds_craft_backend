@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS trainers (
   phone        TEXT,
   fee_session  NUMERIC(10,2) DEFAULT 0,
   status       TEXT DEFAULT 'active' CHECK (status IN ('active','inactive')),
+  -- v2: extended profile fields
+  title        TEXT,                                           -- Job title / role (e.g. "Robotics Instructor")
+  start_year   INTEGER,                                        -- Starting working year (for experience calc)
+  start_date   DATE,                                          -- Exact start working date
+  description  TEXT,                                          -- Bio / specialties
+  rating       NUMERIC(3,1) CHECK (rating IS NULL OR (rating >= 0 AND rating <= 5)),  -- 0.0–5.0
+  avatar_url   TEXT,                                          -- Profile photo (base64 data URL or external URL)
   created_at   TIMESTAMPTZ DEFAULT NOW(),
   updated_at   TIMESTAMPTZ DEFAULT NOW()
 );
