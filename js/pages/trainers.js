@@ -101,10 +101,39 @@ const TrainersPage = {
     grid.innerHTML = trainers.map(t => this.trainerCardHTML(t)).join('');
   },
 
+  // ── Star rating HTML (read-only display) ──────────────────────────────────
+  _starsHTML(rating) {
+    if (!rating) return `<span style="font-size:.72rem;color:var(--text-muted);font-style:italic">Not rated</span>`;
+    const full  = Math.floor(rating);
+    const half  = rating % 1 >= 0.5 ? 1 : 0;
+    const empty = 5 - full - half;
+    let html = '';
+    for (let i = 0; i < full;  i++) html += `<i class="fas fa-star"  style="color:#f59e0b;font-size:12px"></i>`;
+    if (half)                        html += `<i class="fas fa-star-half-alt" style="color:#f59e0b;font-size:12px"></i>`;
+    for (let i = 0; i < empty; i++) html += `<i class="far fa-star"  style="color:#f59e0b;font-size:12px"></i>`;
+    return `<span style="display:inline-flex;align-items:center;gap:2px">${html}
+      <span style="font-size:.72rem;color:var(--text-muted);margin-left:3px">${Number(rating).toFixed(1)}/5</span>
+    </span>`;
+  },
+
   trainerCardHTML(t) {
-    const color = Utils.avatarColor(t.full_name);
+    const color  = t.avatar_color || Utils.avatarColor(t.full_name);
     const levels = t._levels || [];
-    // Group levels by course name
+
+    // Avatar: photo or initials
+    const avatarHTML = t.avatar_url
+      ? `<div class="trainer-avatar" style="padding:0;overflow:hidden;background:transparent">
+           <img src="${Utils.esc(t.avatar_url)}" alt="${Utils.esc(t.full_name)}"
+             style="width:100%;height:100%;object-fit:cover;border-radius:50%" />
+         </div>`
+      : `<div class="trainer-avatar" style="background:${color}">${Utils.initials(t.full_name)}</div>`;
+
+    // Experience years
+    const expYears = t.start_year
+      ? `${new Date().getFullYear() - parseInt(t.start_year)}y exp`
+      : (t.start_date ? `Since ${t.start_date.slice(0,4)}` : '');
+
+    // Group levels by course
     const courseMap = {};
     levels.forEach(lv => {
       const cname = lv.course?.name || 'General';
@@ -133,30 +162,44 @@ const TrainersPage = {
 
     return `
       <div class="trainer-card">
+
+        <!-- Header: photo + name + status -->
         <div class="trainer-card-header">
           <div style="display:flex;align-items:center;gap:12px">
-            <div class="trainer-avatar" style="background:${color}">${Utils.initials(t.full_name)}</div>
-            <div>
-              <div style="font-weight:700;font-size:var(--font-size-md)">${Utils.esc(t.full_name)}</div>
-              <div style="font-size:var(--font-size-xs);color:var(--text-muted)">
-                Staff / Trainer
-                <span style="margin-left:6px;background:var(--bg-tertiary);border-radius:99px;
-                  padding:1px 7px;font-size:10px;font-weight:600;color:var(--text-secondary)">
+            ${avatarHTML}
+            <div style="min-width:0">
+              <div style="font-weight:700;font-size:var(--font-size-md);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                ${Utils.esc(t.full_name)}
+              </div>
+              ${t.title ? `<div style="font-size:.75rem;color:var(--brand-primary);font-weight:600;margin-top:1px">${Utils.esc(t.title)}</div>` : ''}
+              <div style="font-size:.72rem;color:var(--text-muted);margin-top:2px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                ${expYears ? `<span><i class="fas fa-briefcase" style="font-size:9px"></i> ${expYears}</span>` : ''}
+                <span style="background:var(--bg-card2);border-radius:99px;padding:1px 7px;font-size:10px;font-weight:600">
                   ${levels.length} level${levels.length !== 1 ? 's' : ''}
                 </span>
               </div>
             </div>
           </div>
-          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
             ${Utils.statusBadge(t.status)}
+            ${this._starsHTML(t.rating)}
           </div>
         </div>
 
+        <!-- Description -->
+        ${t.description ? `
+          <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px;
+            line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;
+            -webkit-box-orient:vertical;overflow:hidden">
+            ${Utils.esc(t.description)}
+          </div>` : ''}
+
         <!-- Contact info -->
-        <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px">
-          ${t.email ? `<div style="font-size:var(--font-size-sm);color:var(--text-secondary)"><i class="fas fa-envelope" style="width:16px;color:var(--text-muted)"></i> ${Utils.esc(t.email)}</div>` : ''}
-          ${t.phone ? `<div style="font-size:var(--font-size-sm);color:var(--text-secondary)"><i class="fas fa-phone" style="width:16px;color:var(--text-muted)"></i> ${Utils.esc(t.phone)}</div>` : ''}
-          ${t.fee_session ? `<div style="font-size:var(--font-size-sm);color:var(--brand-primary);font-weight:600"><i class="fas fa-dollar-sign" style="width:16px"></i> ${Utils.formatCurrency(t.fee_session)} / session</div>` : ''}
+        <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:10px">
+          ${t.email      ? `<div style="font-size:var(--font-size-sm);color:var(--text-secondary)"><i class="fas fa-envelope" style="width:16px;color:var(--text-muted)"></i> ${Utils.esc(t.email)}</div>` : ''}
+          ${t.phone      ? `<div style="font-size:var(--font-size-sm);color:var(--text-secondary)"><i class="fas fa-phone" style="width:16px;color:var(--text-muted)"></i> ${Utils.esc(t.phone)}</div>` : ''}
+          ${t.start_date ? `<div style="font-size:var(--font-size-sm);color:var(--text-secondary)"><i class="fas fa-calendar-alt" style="width:16px;color:var(--text-muted)"></i> Joined ${Utils.formatDate(t.start_date)}</div>` : ''}
+          ${t.fee_session? `<div style="font-size:var(--font-size-sm);color:var(--brand-primary);font-weight:600"><i class="fas fa-dollar-sign" style="width:16px"></i> ${Utils.formatCurrency(t.fee_session)} / session</div>` : ''}
         </div>
 
         <!-- Assigned levels -->
@@ -177,8 +220,8 @@ const TrainersPage = {
           <button class="btn btn-primary btn-sm" style="flex:1;min-width:110px" onclick="TrainersPage.openAttendance('${t.id}')">
             <i class="fas fa-calendar-check"></i> Attendance
           </button>
-          <button class="btn btn-ghost btn-icon btn-sm" onclick="TrainersPage.openEdit('${t.id}')"><i class="fas fa-edit"></i></button>
-          <button class="btn btn-danger btn-icon btn-sm" onclick="TrainersPage.deleteTrainer('${t.id}', '${Utils.esc(t.full_name)}')"><i class="fas fa-trash"></i></button>
+          <button class="btn btn-ghost btn-icon btn-sm" title="Edit" onclick="TrainersPage.openEdit('${t.id}')"><i class="fas fa-edit"></i></button>
+          <button class="btn btn-danger btn-icon btn-sm" title="Delete" onclick="TrainersPage.deleteTrainer('${t.id}', '${Utils.esc(t.full_name)}')"><i class="fas fa-trash"></i></button>
         </div>
       </div>
     `;
@@ -195,50 +238,256 @@ const TrainersPage = {
   },
 
   trainerFormHTML(t) {
+    // Build interactive star-rating widget (1–5, supports .5 steps via slider)
+    const ratingVal = t?.rating ? Number(t.rating).toFixed(1) : '0';
+    // Current year for start_year max
+    const thisYear = new Date().getFullYear();
+
     return `
-      <form onsubmit="TrainersPage.saveTrainer(event, ${t ? `'${t.id}'` : 'null'})">
+      <form id="trainer-form" onsubmit="TrainersPage.saveTrainer(event, ${t ? `'${t.id}'` : 'null'})">
+
+        <!-- ── Photo upload ── -->
+        <div class="form-group" style="margin-bottom:1rem">
+          <label class="form-label"><i class="fas fa-camera" style="color:var(--brand-primary)"></i> Profile Photo</label>
+          <div style="display:flex;align-items:center;gap:14px">
+            <div id="trainer-photo-preview" style="width:72px;height:72px;border-radius:50%;overflow:hidden;
+              background:var(--bg-card2);border:2px solid var(--border);flex-shrink:0;
+              display:flex;align-items:center;justify-content:center;font-size:1.6rem;color:var(--text-muted)">
+              ${t?.avatar_url
+                ? `<img src="${Utils.esc(t.avatar_url)}" style="width:100%;height:100%;object-fit:cover" />`
+                : `<i class="fas fa-user"></i>`}
+            </div>
+            <div style="flex:1">
+              <input type="file" id="trainer-photo-input" accept="image/*"
+                style="display:none" onchange="TrainersPage._onPhotoSelect(this)" />
+              <button type="button" class="btn btn-secondary btn-sm"
+                onclick="document.getElementById('trainer-photo-input').click()">
+                <i class="fas fa-upload"></i> Upload Photo
+              </button>
+              <button type="button" class="btn btn-ghost btn-sm" style="margin-left:4px"
+                onclick="TrainersPage._clearPhoto()">
+                <i class="fas fa-times"></i> Clear
+              </button>
+              <div id="trainer-photo-hint" style="font-size:.72rem;color:var(--text-muted);margin-top:5px">
+                JPG, PNG, WebP · max 5 MB · auto-compressed to 200 px
+              </div>
+            </div>
+          </div>
+          <!-- Hidden field stores the base64 data URL -->
+          <input type="hidden" id="trainer-photo-data" name="avatar_url"
+            value="${Utils.esc(t?.avatar_url || '')}" />
+        </div>
+
+        <!-- ── Name + Title ── -->
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Full Name *</label>
-            <input type="text" name="full_name" class="form-input" required value="${Utils.esc(t?.full_name || '')}" />
+            <input type="text" name="full_name" class="form-input" required
+              value="${Utils.esc(t?.full_name || '')}" />
           </div>
           <div class="form-group">
-            <label class="form-label">Email</label>
-            <input type="email" name="email" class="form-input" value="${Utils.esc(t?.email || '')}" />
+            <label class="form-label">Title / Role</label>
+            <input type="text" name="title" class="form-input"
+              placeholder="e.g. Robotics Instructor"
+              value="${Utils.esc(t?.title || '')}" />
           </div>
         </div>
+
+        <!-- ── Email + Phone ── -->
         <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Phone</label>
-            <input type="tel" name="phone" class="form-input" value="${Utils.esc(t?.phone || '')}" />
+            <label class="form-label">Email</label>
+            <input type="email" name="email" class="form-input"
+              value="${Utils.esc(t?.email || '')}" />
           </div>
           <div class="form-group">
-            <label class="form-label">Fee per Session ($)</label>
-            <input type="number" name="fee_session" class="form-input" step="0.01" value="${t?.fee_session || '0'}" />
+            <label class="form-label">Phone</label>
+            <input type="tel" name="phone" class="form-input"
+              value="${Utils.esc(t?.phone || '')}" />
           </div>
         </div>
-        <div class="form-group">
-          <label class="form-label">Status</label>
-          <select name="status" class="form-select">
-            <option value="active" ${t?.status==='active'?'selected':''}>Active</option>
-            <option value="inactive" ${t?.status==='inactive'?'selected':''}>Inactive</option>
-          </select>
+
+        <!-- ── Start Date + Start Year ── -->
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Start Working Date</label>
+            <input type="date" name="start_date" class="form-input"
+              value="${t?.start_date ? t.start_date.slice(0,10) : ''}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Starting Working Year
+              <span style="font-size:.7rem;color:var(--text-muted)">(for experience calc)</span>
+            </label>
+            <input type="number" name="start_year" class="form-input"
+              min="1980" max="${thisYear}" placeholder="e.g. ${thisYear - 3}"
+              value="${t?.start_year || ''}" />
+          </div>
         </div>
+
+        <!-- ── Fee + Status ── -->
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">Fee per Session ($)</label>
+            <input type="number" name="fee_session" class="form-input"
+              step="0.01" value="${t?.fee_session || '0'}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Status</label>
+            <select name="status" class="form-select">
+              <option value="active"   ${t?.status !== 'inactive' ? 'selected' : ''}>Active</option>
+              <option value="inactive" ${t?.status === 'inactive'  ? 'selected' : ''}>Inactive</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- ── Rating ── -->
+        <div class="form-group">
+          <label class="form-label" style="display:flex;align-items:center;justify-content:space-between">
+            <span><i class="fas fa-star" style="color:#f59e0b"></i> Rating (out of 5)</span>
+            <span id="trainer-rating-num"
+              style="font-size:.78rem;font-weight:700;color:#f59e0b">
+              ${parseFloat(ratingVal) === 0 ? 'Not rated' : `${parseFloat(ratingVal).toFixed(1)} / 5`}
+            </span>
+          </label>
+          <!-- Clickable star buttons (half-step) + hidden range for value -->
+          <div style="display:flex;align-items:center;gap:10px">
+            <div id="trainer-star-btns" style="display:flex;gap:4px;align-items:center">
+              ${[1,2,3,4,5].map(n => `
+                <span data-star="${n}" onclick="TrainersPage._onStarClick(${n})"
+                  style="cursor:pointer;font-size:1.55rem;line-height:1;user-select:none"
+                  title="${n} star${n>1?'s':''}">
+                  ${parseFloat(ratingVal) >= n ? '<i class="fas fa-star" style="color:#f59e0b"></i>'
+                    : parseFloat(ratingVal) >= n - 0.5 ? '<i class="fas fa-star-half-alt" style="color:#f59e0b"></i>'
+                    : '<i class="far fa-star" style="color:#d1d5db"></i>'}
+                </span>`).join('')}
+            </div>
+            <input type="range" name="rating" id="trainer-rating-range"
+              min="0" max="5" step="0.5" value="${ratingVal}"
+              style="flex:1;accent-color:#f59e0b;height:4px"
+              oninput="TrainersPage._onRatingChange(this.value)" />
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:.68rem;
+            color:var(--text-muted);margin-top:3px;padding:0 2px">
+            <span>0 — Not rated</span><span>2.5 — Good</span><span>5 — Excellent</span>
+          </div>
+        </div>
+
+        <!-- ── Description ── -->
+        <div class="form-group">
+          <label class="form-label">Bio / Description</label>
+          <textarea name="description" class="form-textarea" rows="3"
+            placeholder="Brief bio, specialties, background…">${Utils.esc(t?.description || '')}</textarea>
+        </div>
+
         <div class="modal-footer" style="padding:0;border:none;margin-top:1rem">
           <button type="button" class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
-          <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> ${t ? 'Save Changes' : 'Onboard Trainer'}</button>
+          <button type="submit" class="btn btn-primary">
+            <i class="fas fa-save"></i> ${t ? 'Save Changes' : 'Onboard Trainer'}
+          </button>
         </div>
       </form>
     `;
   },
 
+  // ── Photo helpers ───────────────────────────────────────────────────────────
+  _onPhotoSelect(input) {
+    const file = input.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      Toast.error('Photo must be under 5 MB.'); input.value = ''; return;
+    }
+
+    // Compress to max 200×200 px JPEG (keeps base64 small for DB storage)
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 200;
+        let w = img.width, h = img.height;
+        if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+        else        { w = Math.round(w * MAX / h); h = MAX; }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+        document.getElementById('trainer-photo-data').value = dataUrl;
+        document.getElementById('trainer-photo-preview').innerHTML =
+          `<img src="${dataUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:50%" />`;
+
+        // Show compressed size hint
+        const kb = Math.round(dataUrl.length * 0.75 / 1024);
+        const hint = document.getElementById('trainer-photo-hint');
+        if (hint) hint.textContent = `✅ Compressed: ~${kb} KB`;
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  },
+
+  _clearPhoto() {
+    document.getElementById('trainer-photo-data').value = '';
+    document.getElementById('trainer-photo-preview').innerHTML =
+      `<i class="fas fa-user" style="font-size:1.6rem;color:var(--text-muted)"></i>`;
+    const fi = document.getElementById('trainer-photo-input');
+    if (fi) fi.value = '';
+    const hint = document.getElementById('trainer-photo-hint');
+    if (hint) hint.textContent = 'JPG, PNG, WebP · max 5 MB · auto-compressed to 200 px';
+  },
+
+  _onRatingChange(val) {
+    const v = parseFloat(val) || 0;
+    // Update numeric label
+    const numLbl = document.getElementById('trainer-rating-num');
+    if (numLbl) numLbl.textContent = v === 0 ? 'Not rated' : `${v.toFixed(1)} / 5`;
+    // Sync star buttons
+    const container = document.getElementById('trainer-star-btns');
+    if (container) {
+      container.querySelectorAll('[data-star]').forEach(el => {
+        const n = parseInt(el.dataset.star);
+        el.innerHTML = v >= n
+          ? `<i class="fas fa-star" style="color:#f59e0b"></i>`
+          : v >= n - 0.5
+            ? `<i class="fas fa-star-half-alt" style="color:#f59e0b"></i>`
+            : `<i class="far fa-star" style="color:#d1d5db"></i>`;
+      });
+    }
+  },
+
+  _onStarClick(n) {
+    // Full click = set to that star (or toggle off if already exactly that value)
+    const range = document.getElementById('trainer-rating-range');
+    if (!range) return;
+    const cur = parseFloat(range.value) || 0;
+    const newVal = cur === n ? 0 : n; // click same star again → clear rating
+    range.value = newVal;
+    this._onRatingChange(newVal);
+  },
+
   async saveTrainer(e, id) {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const data = Object.fromEntries(fd.entries());
-    data.fee_session = parseFloat(data.fee_session) || 0;
-    if (!data.email) data.email = null;
-    if (!data.phone) data.phone = null;
+
+    const data = {
+      full_name:   fd.get('full_name'),
+      title:       fd.get('title')       || null,
+      email:       fd.get('email')       || null,
+      phone:       fd.get('phone')       || null,
+      fee_session: parseFloat(fd.get('fee_session')) || 0,
+      status:      fd.get('status')      || 'active',
+      start_date:  fd.get('start_date')  || null,
+      start_year:  fd.get('start_year')  ? parseInt(fd.get('start_year')) : null,
+      description: fd.get('description') || null,
+      rating:      fd.get('rating')      ? parseFloat(fd.get('rating')) : null,
+      avatar_url:  fd.get('avatar_url')  || null,
+    };
+
+    // Don't store empty string for avatar_url
+    if (!data.avatar_url) data.avatar_url = null;
+    // Don't store 0 rating — treat as "not rated"
+    if (data.rating === 0) data.rating = null;
+
     try {
       const result = id ? await DB.updateTrainer(id, data) : await DB.createTrainer(data);
       if (result.error) throw result.error;
