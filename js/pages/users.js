@@ -335,10 +335,36 @@ const UsersPage = {
           </div>
         </div>
         ${!user ? `
+        <div class="form-group" id="app-password-group">
+          <label class="form-label">
+            Portal Password
+            <span style="color:var(--text-muted);font-weight:400;font-size:.8rem">
+              — used to log in to the parent / staff portal
+            </span>
+          </label>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input type="text" name="app_password" id="app_password_input" class="form-input"
+              placeholder="Leave blank to auto-generate from phone number"
+              style="font-family:monospace;letter-spacing:.04em" />
+            <button type="button" class="btn btn-secondary btn-sm" style="white-space:nowrap"
+              onclick="UsersPage.autoFillPassword()">
+              <i class="fas fa-magic"></i> Auto
+            </button>
+          </div>
+          <p style="font-size:.75rem;color:var(--text-muted);margin-top:4px">
+            💡 If left blank and a phone number is entered, the phone number will be used as password.
+            For parents, a Supabase Auth account is also created automatically so they can log in to the parent portal.
+          </p>
+        </div>` : `
         <div class="form-group">
-          <label class="form-label">Mobile App Password <span class="text-muted">(optional)</span></label>
-          <input type="password" name="app_password" class="form-input" placeholder="Password for mobile app login" />
-        </div>` : ''}
+          <label class="form-label">Reset Portal Password <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+          <input type="text" name="app_password" id="app_password_input" class="form-input"
+            placeholder="Leave blank to keep current password"
+            style="font-family:monospace;letter-spacing:.04em" />
+          <p style="font-size:.75rem;color:var(--text-muted);margin-top:4px">
+            Only fill this to change the password. For parents this also updates their Supabase Auth account.
+          </p>
+        </div>`}
         <div class="form-group">
           <label class="form-label">Notes</label>
           <textarea name="notes" class="form-textarea" placeholder="Any additional notes…">${Utils.esc(user?.notes || '')}</textarea>
@@ -393,38 +419,186 @@ const UsersPage = {
     }
   },
 
+  // ── Helper: auto-fill the password field from the phone number ──────────
+  autoFillPassword() {
+    const phoneInput = document.querySelector('[name="phone"]');
+    const pwInput    = document.getElementById('app_password_input');
+    if (!pwInput) return;
+    const phone = phoneInput?.value?.trim() || '';
+    if (phone) {
+      pwInput.value = phone;
+      pwInput.style.background = 'rgba(34,197,94,.07)';
+      pwInput.style.borderColor = 'var(--brand-primary)';
+    } else {
+      Toast.warning('Enter a phone number first.');
+    }
+  },
+
+  // ── Helper: normalize a phone number to +961XXXXXXXX format ───────────────
+  // Ensures the password is always in the canonical international format
+  // regardless of how the admin typed the number.
+  _normalizePhone(raw) {
+    if (!raw) return null;
+    let digits = raw.replace(/[^\d]/g, ''); // strip everything except digits
+
+    // Lebanese number heuristics:
+    // 96170178043  → +96170178043
+    // 70178043     → +96170178043   (8-digit local, prefix +961)
+    // 070178043    → +96170178043   (leading 0, strip it then prefix +961)
+    // 0096170178043 → +96170178043  (00 international prefix)
+    if (digits.startsWith('00961')) digits = digits.slice(2);      // 00961… → 961…
+    if (digits.startsWith('961'))   return '+' + digits;           // already has country code
+    if (digits.startsWith('0'))     digits = digits.slice(1);      // strip leading 0
+    if (digits.length >= 7)         return '+961' + digits;        // local → international
+    return '+' + digits; // fallback — just add +
+  },
+
+  // ── Helper: generate a random 10-char alphanumeric password ──────────────
+  _generateRandPassword() {
+    const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
+    return Array.from({ length: 10 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  },
+
+  // ── Helper: attempt Supabase Auth signUp for a parent ────────────────────
+  // Password is always the normalized phone (+961XXXXXXXX).
+  // Returns { authId, password, alreadyExists } or throws.
+  async _createParentAuthAccount(email, password, fullName, publicUserId) {
+    if (!email)    throw new Error('Email is required to create a parent portal login.');
+    if (!password) throw new Error('Password (phone number) is required.');
+    if (!DB.client) throw new Error('Supabase client not initialised.');
+
+    // Supabase requires ≥ 6 characters
+    if (password.length < 6) {
+      throw new Error(`Password too short (${password.length} chars). Phone number must be at least 6 digits.`);
+    }
+
+    const { data, error } = await DB.client.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          user_type:      'parent',
+          full_name:      fullName,
+          public_user_id: publicUserId,
+        },
+      },
+    });
+
+    if (error) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes('already registered') || msg.includes('user already')) {
+        return { alreadyExists: true, authId: null, password };
+      }
+      throw error;
+    }
+
+    // Supabase sometimes returns a user without id if email confirmation is
+    // required and the account already exists under a different state.
+    const authId = data?.user?.id || null;
+    const needsConfirm = !data?.user?.email_confirmed_at;
+    return { alreadyExists: false, authId, password, needsConfirm };
+  },
+
   async saveUser(e, id) {
     e.preventDefault();
     const form = e.target;
-    const fd = new FormData(form);
+    const fd   = new FormData(form);
     const data = Object.fromEntries(fd.entries());
 
     // Clean empty strings
     Object.keys(data).forEach(k => { if (data[k] === '') data[k] = null; });
 
     data.avatar_color = Utils.avatarColor(data.full_name);
-    // avatar_url comes from the hidden field (base64 or URL); keep null if empty
     if (!data.avatar_url) data.avatar_url = null;
+
+    // ── Resolve portal password ──────────────────────────────────────────
+    // For parents: ALWAYS use normalized phone (+961XXXXXXXX) as password.
+    // Priority for typed password field → normalized phone → random fallback.
+    const isParent = data.user_type === 'parent';
+    const normalizedPhone = this._normalizePhone(data.phone?.trim());
+
+    let resolvedPassword = data.app_password?.trim() || null;
+
+    if (!id) {
+      // New user: prefer phone (normalized) over anything else for parents
+      if (isParent) {
+        resolvedPassword = normalizedPhone || resolvedPassword || this._generateRandPassword();
+      } else {
+        resolvedPassword = resolvedPassword || normalizedPhone || this._generateRandPassword();
+      }
+    }
+
+    // Store normalized phone in the phone field if it changed
+    if (normalizedPhone && normalizedPhone !== data.phone?.trim()) {
+      data.phone = normalizedPhone;
+    }
+
+    // Always store resolved password in app_password so admin can see it
+    if (resolvedPassword) data.app_password = resolvedPassword;
 
     try {
       let result;
       if (id) {
+        // ── UPDATE existing user ─────────────────────────────────────────
+        // Don't overwrite app_password if field was left blank on edit
+        if (!resolvedPassword) delete data.app_password;
         result = await DB.updateUser(id, data);
-      } else {
-        result = await DB.createUser(data);
-      }
-      if (result.error) throw result.error;
-      Toast.success(id ? 'User updated!' : 'User created!');
+        if (result.error) throw result.error;
+        Toast.success('User updated!');
 
-      // ── Fire on_student_created notification rule for new students ──
-      if (!id && data.user_type === 'student') {
+      } else {
+        // ── CREATE new user ──────────────────────────────────────────────
+        result = await DB.createUser(data);
+        if (result.error) throw result.error;
+
         const created = result.data?.[0] || result.data || {};
-        NotificationsPage.triggerRule('on_student_created', {
-          student_id: created.id   || null,
-          full_name:  data.full_name || '',
-          email:      data.email     || '',
-          phone:      data.phone     || '',
-        }).catch(err => console.warn('on_student_created trigger failed:', err));
+        const newId   = created.id || null;
+
+        // ── Auto-create Supabase Auth account for parents ────────────────
+        if (isParent && data.email) {
+          let authResult = null;
+          try {
+            authResult = await this._createParentAuthAccount(
+              data.email, resolvedPassword, data.full_name, newId
+            );
+
+            if (authResult.alreadyExists) {
+              Toast.warning(`⚠️ ${data.email} already has a portal account. Password unchanged.`);
+            } else if (authResult.authId) {
+              // Save auth_id back to users row so push notifications work
+              await DB.updateUser(newId, { auth_id: authResult.authId });
+              // Auto-confirm email via SQL note shown to admin
+              console.info('[createParent] auth_id saved:', authResult.authId);
+            }
+          } catch (authErr) {
+            // Don't block user creation — just warn
+            console.warn('[createParent] Auth account creation failed:', authErr.message);
+            Toast.warning(`Parent saved, but portal account creation failed: ${authErr.message}`);
+          }
+
+          // Show credentials to admin regardless
+          this._showParentCredentials({
+            name:          data.full_name,
+            email:         data.email,
+            password:      resolvedPassword,
+            alreadyExists: authResult?.alreadyExists  || false,
+            authId:        authResult?.authId         || null,
+            needsConfirm:  authResult?.needsConfirm   ?? true,
+          });
+
+        } else {
+          Toast.success('User created!');
+        }
+
+        // ── Fire on_student_created notification ─────────────────────────
+        if (data.user_type === 'student') {
+          NotificationsPage.triggerRule('on_student_created', {
+            student_id: newId        || null,
+            full_name:  data.full_name || '',
+            email:      data.email     || '',
+            phone:      data.phone     || '',
+          }).catch(err => console.warn('on_student_created trigger failed:', err));
+        }
       }
 
       Modal.close();
@@ -432,6 +606,132 @@ const UsersPage = {
     } catch (err) {
       Toast.error(err.message || 'Failed to save user');
     }
+  },
+
+  // ── Show a credentials summary modal after creating a parent ─────────────
+  _showParentCredentials({ name, email, password, alreadyExists, authId, needsConfirm }) {
+    const em = (email || '').replace(/'/g, "\\'");
+
+    const statusHtml = alreadyExists
+      ? `<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+           border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#fbbf24">
+           ⚠️ A portal account already exists for this email — password was <strong>not</strong> changed.<br>
+           The existing password (phone number) still applies.
+         </div>`
+      : authId
+        ? `<div style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);
+             border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#4ade80">
+             ✅ Portal account created &amp; auth_id saved — push notifications ready.<br>
+             ${needsConfirm
+               ? `<span style="color:#fbbf24;font-size:.8rem;">
+                    ⚠️ Email confirmation pending — run the SQL below or the parent may not be able to log in.
+                  </span>`
+               : `<span style="font-size:.8rem;color:#86efac;">Email auto-confirmed ✅</span>`}
+           </div>`
+        : `<div style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);
+             border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#f87171">
+             ⚠️ Parent record saved but Supabase Auth account could <strong>not</strong> be created automatically.<br>
+             Open <strong>create_auth.html</strong> → Method B → enter the email below → copy SQL → run in Supabase.
+           </div>`;
+
+    // Always show confirm SQL — always needed until Supabase auto-confirm is enabled
+    const safeEmail = (email || '').replace(/'/g, "''");
+    const confirmSql =
+`-- Run in Supabase SQL Editor to confirm ${name}'s email:
+-- https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new
+UPDATE auth.users
+SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
+    updated_at = NOW()
+WHERE email = '${safeEmail}';
+
+-- Verify
+SELECT email, email_confirmed_at IS NOT NULL AS confirmed
+FROM auth.users WHERE email = '${safeEmail}';`;
+
+    const html = `
+      <div style="font-size:.88rem;line-height:1.7">
+        ${statusHtml}
+
+        <p style="color:var(--text-muted);margin-bottom:12px">
+          Share these credentials with <strong>${Utils.esc(name)}</strong>
+          to log in to the parent portal:
+        </p>
+
+        <!-- Credentials box -->
+        <div style="background:var(--bg-card2);border:2px solid var(--brand-primary);
+             border-radius:10px;padding:18px;margin-bottom:14px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div>
+              <div style="color:var(--text-muted);font-size:.72rem;text-transform:uppercase;
+                letter-spacing:.05em;font-weight:700;margin-bottom:4px">📧 Email (login)</div>
+              <div style="font-family:monospace;font-size:.95rem;font-weight:700;
+                color:var(--brand-primary);word-break:break-all">${Utils.esc(email)}</div>
+            </div>
+            <div>
+              <div style="color:var(--text-muted);font-size:.72rem;text-transform:uppercase;
+                letter-spacing:.05em;font-weight:700;margin-bottom:4px">🔑 Password</div>
+              <div style="font-family:monospace;font-size:.95rem;font-weight:700;
+                color:var(--brand-primary)">${Utils.esc(password)}</div>
+            </div>
+          </div>
+          <div style="margin-top:10px;font-size:.75rem;color:var(--text-muted)">
+            💡 Password = phone number in international format (+961XXXXXXXX)
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+          <button class="btn btn-primary btn-sm"
+            onclick="navigator.clipboard.writeText('Email: ${em}\\nPassword: ${Utils.esc(password)}')
+              .then(()=>Toast.success('✅ Credentials copied to clipboard!'))">
+            <i class="fas fa-copy"></i> Copy credentials
+          </button>
+          <button class="btn btn-secondary btn-sm"
+            onclick="UsersPage._copyConfirmSql('${em}')">
+            <i class="fas fa-database"></i> Copy confirm-email SQL
+          </button>
+        </div>
+
+        <!-- Confirm SQL — always visible, prominent -->
+        <div style="background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.3);
+             border-radius:8px;padding:12px">
+          <div style="font-size:.78rem;font-weight:700;color:#fbbf24;margin-bottom:6px">
+            ⚡ Required: run this SQL in Supabase to confirm the email
+          </div>
+          <div style="font-size:.72rem;color:#94a3b8;margin-bottom:8px">
+            Without this step, the parent may see "Email not confirmed" when trying to log in.
+            <a href="https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new"
+               target="_blank" style="color:#38bdf8">Open Supabase SQL Editor ↗</a>
+          </div>
+          <pre style="background:#0f172a;border-radius:6px;padding:10px;font-size:.72rem;
+            white-space:pre-wrap;border:1px solid #334155;color:#a5f3fc;margin:0">${confirmSql}</pre>
+        </div>
+      </div>
+      <div class="modal-footer" style="padding:0;border:none;margin-top:1rem">
+        <button class="btn btn-secondary" onclick="UsersPage._copyConfirmSql('${em}')">
+          <i class="fas fa-database"></i> Copy SQL
+        </button>
+        <button class="btn btn-primary" onclick="Modal.close()">
+          <i class="fas fa-check"></i> Done
+        </button>
+      </div>
+    `;
+
+    Modal.open(`🔑 Parent Portal Credentials — ${Utils.esc(name)}`, html, { size: 'md' });
+  },
+
+  _copyConfirmSql(email) {
+    const safe = (email || '').replace(/'/g, "''");
+    const sql =
+`UPDATE auth.users
+SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
+    updated_at = NOW()
+WHERE email = '${safe}';
+
+SELECT email, email_confirmed_at IS NOT NULL AS confirmed
+FROM auth.users WHERE email = '${safe}';`;
+    navigator.clipboard.writeText(sql)
+      .then(() => Toast.success('✅ SQL copied! Paste in Supabase SQL Editor → Run.'));
   },
 
   async deleteUser(id, name) {
