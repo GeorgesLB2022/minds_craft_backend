@@ -692,6 +692,21 @@ const AttendancePage = {
       rec._saving = false;
       rec._saved  = true;
       rec._error  = false;
+
+      // ── Fire on_absent notification rule when a student is marked absent ──
+      // Only fire when status changes TO 'absent' (not on updates to other fields)
+      if (rec.status === 'absent' && rec._prevStatus !== 'absent') {
+        const student = this.students.find(s => s.id === studentId);
+        if (student && typeof NotificationsPage !== 'undefined') {
+          NotificationsPage.triggerRule('on_absent', {
+            student_id: student.id,
+            full_name:  student.full_name || '',
+            email:      student.email     || '',
+            phone:      student.phone     || '',
+            date:       this.date,
+          }).catch(err => console.warn('on_absent trigger failed:', err));
+        }
+      }
     } catch (err) {
       console.error('Auto-save failed for', studentId, err);
       rec._saving = false;
@@ -716,6 +731,7 @@ const AttendancePage = {
 
     const rec        = this.records[studentId];
     const prevStatus = rec.status;
+    rec._prevStatus  = prevStatus;  // captured for on_absent trigger in _saveRecord
     rec.status       = status;
 
     // Toggle: clicking the active button again clears the status
