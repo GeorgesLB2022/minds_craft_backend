@@ -121,6 +121,39 @@ const DB = {
     return this.getAll('users', { filter: { user_type: type }, order: 'full_name', limit: 2000 });
   },
 
+  /**
+   * Look up a user's Supabase Auth UID (= users.auth_id).
+   * This is the value that must be stored in parent_notifications.parent_user_id
+   * so that the parent portal RLS policy (auth.uid() = parent_user_id) works.
+   *
+   * @param {string} identifier  — users.id (UUID) OR email address
+   * @returns {Promise<string|null>}  auth_id or null if not linked yet
+   */
+  async getUserAuthId(identifier) {
+    if (!identifier) return null;
+    try {
+      // Try by UUID first (users.id)
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(identifier);
+      if (isUUID) {
+        const { data } = await this.getOne('users', identifier);
+        return data?.auth_id || null;
+      }
+      // Fall back to email lookup
+      const { data: rows } = await this.getAll('users', {
+        select: 'id,auth_id',
+        limit:  1,
+      });
+      // getAll doesn't support ilike in all versions — filter in memory
+      const match = (rows || []).find(
+        u => (u.email || '').toLowerCase() === identifier.toLowerCase()
+      );
+      return match?.auth_id || null;
+    } catch (e) {
+      console.warn('[DB.getUserAuthId] failed:', e.message);
+      return null;
+    }
+  },
+
   async getParents() {
     return this.getUsersByType('parent');
   },
@@ -466,6 +499,56 @@ const DB = {
       if (data[k] !== undefined) clean[k] = data[k];
     });
     return this.insert('notification_logs', clean);
+  },
+
+  // ─────────────────────────────────────────────
+  // PARENT NOTIFICATIONS (in-app inbox)
+  // Written by admin app → read by parent portal app
+  // ─────────────────────────────────────────────
+
+  /**
+   * Push one in-app notification into a parent's inbox.
+   * parent_user_id  — the Supabase auth.uid() of the parent (= users.id after UID sync)
+   * subject         — short title
+   * body            — full message text
+   * type            — 'info'|'payment'|'absence'|'expiry'|'event'|'welcome'|'other'
+   * rule_id         — (optional) notification_rules.id that triggered this
+   * trigger_event   — (optional) e.g. 'on_payment'
+   * metadata        — (optional) JSONB object with extra context
+   */
+  async pushParentNotification({ parent_user_id, subject, body, type = 'info',
+                                  rule_id = null, trigger_event = null, metadata = {} }) {
+    if (!parent_user_id) return { error: new Error('parent_user_id is required') };
+    return this.insert('parent_notifications', {
+      parent_user_id,
+      subject,
+      body,
+      type,
+      rule_id:       rule_id       || null,
+      trigger_event: trigger_event || null,
+      metadata:      metadata      || {},
+    });
+  },
+
+  /** Fetch all inbox rows for a specific parent (admin-side view) */
+  async getParentNotifications(parentUserId, opts = {}) {
+    return this.getAll('parent_notifications', {
+      filter: { parent_user_id: parentUserId },
+      order:  'created_at',
+      asc:    false,
+      limit:  200,
+      ...opts,
+    });
+  },
+
+  /** Mark a single notification as read */
+  async markParentNotificationRead(id) {
+    return this.update('parent_notifications', id, { is_read: true });
+  },
+
+  /** Delete a single parent notification row */
+  async deleteParentNotification(id) {
+    return this.remove('parent_notifications', id);
   },
 
   // ─────────────────────────────────────────────
