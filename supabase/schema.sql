@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS users (
   app_password  TEXT,
   avatar_color  TEXT DEFAULT '#22c55e',
   avatar_url    TEXT,                          -- optional profile photo (URL or base64)
+  auth_id       UUID UNIQUE,                   -- links to Supabase auth.users.id (= auth.uid())
+  -- auth_id is set when the parent signs up/logs in via the parent portal.
+  -- It MUST equal auth.uid() for parent_notifications RLS to work.
   created_at    TIMESTAMPTZ DEFAULT NOW(),
   updated_at    TIMESTAMPTZ DEFAULT NOW()
 );
@@ -626,6 +629,84 @@ CREATE INDEX IF NOT EXISTS idx_level_schedules_level ON level_schedules(level_id
 
 -- M10b: Add schedule_slot to enrollments (stores "Monday 09:00-10:00" or schedule UUID)
 ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS schedule_slot TEXT DEFAULT NULL;
+
+-- M11: push_template column on notification_rules (for in-app push to parent portal)
+ALTER TABLE notification_rules ADD COLUMN IF NOT EXISTS push_template TEXT;
+
+-- ============================================================
+-- M12: PARENT NOTIFICATIONS — in-app inbox for the parent portal
+-- ============================================================
+-- This table is the push/inbox backbone.
+-- The admin app WRITES rows here whenever a push notification is fired.
+-- The parent portal app READS rows where parent_user_id = auth.uid().
+-- RLS ensures each parent only sees their own rows.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS parent_notifications (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  parent_user_id  UUID NOT NULL,
+  -- parent_user_id = Supabase auth.uid() of the parent (= users.auth_id).
+  -- NO FK to users(id) — auth UIDs are different from app UUIDs.
+  -- RLS policy: auth.uid() = parent_user_id (enforces row isolation per parent).
+
+  subject         TEXT NOT NULL,          -- short title (shown as notification header)
+  body            TEXT NOT NULL,          -- full message body
+  type            TEXT NOT NULL DEFAULT 'info'
+                  CHECK (type IN ('info','payment','absence','expiry','event','welcome','other')),
+  -- Semantic type lets the parent app style/icon the notification correctly
+
+  is_read         BOOLEAN NOT NULL DEFAULT false,
+  -- The parent app flips this to true when the parent opens/reads it
+
+  rule_id         UUID REFERENCES notification_rules(id) ON DELETE SET NULL,
+  -- Which rule generated this (null = manual broadcast)
+
+  trigger_event   TEXT,
+  -- Copy of the trigger that fired (on_payment, on_absent, etc.)
+  -- Denormalised for easy filtering in the parent app without a join
+
+  metadata        JSONB DEFAULT '{}',
+  -- Flexible payload: amount, package name, student name, etc.
+  -- Example: {"amount":"$150","package":"Quarterly","student":"Ali Issa"}
+
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+  -- No updated_at needed — rows are append-only; only is_read changes
+);
+
+-- Index: fast lookup per parent (the only query the parent app ever runs)
+CREATE INDEX IF NOT EXISTS idx_parent_notif_parent
+  ON parent_notifications (parent_user_id, created_at DESC);
+
+-- Index: unread count badge
+CREATE INDEX IF NOT EXISTS idx_parent_notif_unread
+  ON parent_notifications (parent_user_id, is_read)
+  WHERE is_read = false;
+
+-- RLS
+ALTER TABLE parent_notifications ENABLE ROW LEVEL SECURITY;
+
+-- Admin portal (authenticated staff) can INSERT and SELECT all rows
+DROP POLICY IF EXISTS "Admin full access on parent_notifications" ON parent_notifications;
+CREATE POLICY "Admin full access on parent_notifications"
+  ON parent_notifications FOR ALL
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
+
+-- Parent portal users can only SELECT their own rows and UPDATE is_read
+-- (The parent portal uses the anon key after sign-in via supabase.auth.signIn,
+--  so auth.uid() is set automatically for each request)
+DROP POLICY IF EXISTS "Parent can read own notifications" ON parent_notifications;
+CREATE POLICY "Parent can read own notifications"
+  ON parent_notifications FOR SELECT
+  TO anon
+  USING (auth.uid() = parent_user_id);
+
+DROP POLICY IF EXISTS "Parent can mark own notifications read" ON parent_notifications;
+CREATE POLICY "Parent can mark own notifications read"
+  ON parent_notifications FOR UPDATE
+  TO anon
+  USING  (auth.uid() = parent_user_id)
+  WITH CHECK (auth.uid() = parent_user_id AND is_read = true);
 
 -- End of migration script
 -- ============================================================
