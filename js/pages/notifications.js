@@ -153,13 +153,25 @@ const NotificationsPage = {
                   <i class="fas fa-sms"></i>SMS
                 </div>
                 <div class="channel-opt" data-channel="push"
-                  onclick="NotificationsPage.toggleChannel('push', this)">
+                  onclick="NotificationsPage.toggleChannel('push', this)"
+                  title="In-app push to parent portal inbox. Requires recipient to have a linked Supabase account.">
                   <i class="fas fa-bell"></i>Push
+                  <span style="font-size:9px;display:block;opacity:.7;line-height:1;margin-top:1px">in-app</span>
                 </div>
                 <div class="channel-opt" data-channel="whatsapp"
                   onclick="NotificationsPage.toggleChannel('whatsapp', this)">
                   <i class="fab fa-whatsapp"></i>WhatsApp
                 </div>
+              </div>
+              <div id="push-channel-note" style="display:none;margin-top:7px;
+                padding:8px 12px;border-radius:6px;font-size:.75rem;line-height:1.5;
+                background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);color:#fde68a">
+                <i class="fas fa-bell" style="color:#f59e0b;margin-right:4px"></i>
+                <strong>Push (in-app)</strong> — writes to the parent portal inbox via Supabase.
+                The recipient must have a <strong>linked Supabase account</strong>
+                (i.e. their email exists in <code>auth.users</code> and their <code>users.id</code>
+                matches their <code>auth.uid()</code>).
+                If you send to a specific email, the system automatically looks up their user id.
               </div>
             </div>
 
@@ -269,6 +281,9 @@ const NotificationsPage = {
       this.selectedChannels.add(channel);
       el.classList.add('active');
     }
+    // Show/hide the push explanation note
+    const pushNote = document.getElementById('push-channel-note');
+    if (pushNote) pushNote.style.display = this.selectedChannels.has('push') ? '' : 'none';
     this.updatePreview();
   },
 
@@ -349,21 +364,59 @@ const NotificationsPage = {
     if (!content) return Toast.warning('Please write a message.');
     if (!channels.length) return Toast.warning('Select at least one channel.');
 
-    let recipients = []; // [{name, email, phone}]
+    let recipients = []; // [{id, name, email, phone}]
 
     if (this._recipientMode === 'specific') {
       const name  = document.getElementById('specific-name')?.value?.trim() || 'Recipient';
       const email = document.getElementById('specific-email')?.value?.trim();
       const phone = document.getElementById('specific-phone')?.value?.trim();
       if (!email && !phone) return Toast.warning('Enter an email or phone number.');
-      recipients = [{ name, email, phone }];
+
+      // ── Push fix: we need users.auth_id (= Supabase auth.uid()) not users.id.
+      // Without auth_id the RLS policy on parent_notifications blocks the parent
+      // from reading rows whose parent_user_id ≠ auth.uid().
+      let authId = null;
+      if (email && channels.includes('push')) {
+        try {
+          const { data: rows } = await DB.getAll('users', {
+            select: 'id,email,auth_id',
+            limit: 2000,
+          });
+          const match = (rows || []).find(
+            u => (u.email || '').toLowerCase() === email.toLowerCase()
+          );
+          if (match) {
+            authId = match.auth_id || null;
+            if (!authId) {
+              console.warn(
+                '[Broadcast] push: user found but auth_id is NULL for', email,
+                '— run fix_push_notifications.html Step 2 to link the auth UID.'
+              );
+            }
+          } else {
+            console.warn('[Broadcast] push: no user found for email', email);
+          }
+        } catch (e) {
+          console.warn('[Broadcast] push: user lookup failed', e);
+        }
+      }
+
+      // r.id = users.auth_id (needed by _sendPush → parent_notifications.parent_user_id)
+      recipients = [{ id: authId, name, email, phone }];
+
     } else {
       const audience = document.getElementById('notif-audience')?.value;
       const typeMap  = { all: null, parents: 'parent', students: 'student', staff: 'staff' };
       const type     = typeMap[audience];
       const { data: users } = type ? await DB.getUsersByType(type) : await DB.getUsers();
+      // Use auth_id (= Supabase auth.uid()) as the push recipient identifier.
+      // Fallback to users.id only if auth_id is null (old records not yet linked).
       recipients = (users || []).map(u => ({
-        id: u.id, name: u.full_name || '', email: u.email || '', phone: u.phone || '',
+        id:    u.auth_id || u.id,   // auth_id preferred; u.id as fallback (may fail RLS)
+        name:  u.full_name  || '',
+        email: u.email      || '',
+        phone: u.phone      || '',
+        _hasAuthId: !!u.auth_id,    // flag so we can warn about missing links
       })).filter(u => u.email || u.phone);
     }
 
@@ -373,40 +426,91 @@ const NotificationsPage = {
     if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending…'; }
 
     let sent = 0, failed = 0;
+    const pushResults = []; // collect push outcomes for summary
 
     for (const r of recipients) {
       for (const ch of channels) {
-        let ok = true;
+        let ok = false; // default to false — only set true on confirmed success
+        let skipReason = '';
         try {
           if (ch === 'sms' && r.phone) {
             const result = await this._sendSMS(r.phone, content);
             ok = result.ok;
           } else if (ch === 'email' && r.email && this._ejsReady()) {
-            const result = await this._sendEmail(r.email, title || 'Notification from Minds\' Craft', content);
+            const result = await this._sendEmail(r.email, title || "Notification — Minds' Craft", content);
             ok = result.ok;
+          } else if (ch === 'push') {
+            // r.id = users.auth_id (set by lookup above).
+            // parent_notifications.parent_user_id MUST equal Supabase auth.uid()
+            // of the parent — that is what the RLS policy checks.
+            if (r.id) {
+              const result = await this._sendPush(
+                r.id,
+                title || "Notification — Minds' Craft",
+                content,
+                'info',
+                { trigger_event: null, metadata: { broadcast: true, sent_to: r.email || r.phone } }
+              );
+              ok = result.ok;
+              if (!ok) skipReason = result.error || 'DB insert failed';
+              pushResults.push({ email: r.email, ok, error: result.error });
+            } else {
+              // auth_id not set → run fix_push_notifications.html Step 2
+              skipReason = `auth_id not linked for "${r.email || r.name}". `
+                + `Open fix_push_notifications.html and complete Step 2 to link `
+                + `the parent's Supabase auth UID to their users record.`;
+              ok = false;
+              pushResults.push({ email: r.email, ok: false, error: skipReason });
+              console.warn('[Broadcast] push skipped (no auth_id):', r.email);
+              Toast.warning(`⚠️ Push skipped: users.auth_id not set for ${r.email || r.name}. Run fix_push_notifications.html → Step 2.`);
+            }
+          } else if (ch === 'sms' && !r.phone) {
+            skipReason = 'no phone number';
+          } else if (ch === 'email' && !r.email) {
+            skipReason = 'no email address';
+          } else {
+            // whatsapp — logged only (no integration yet)
+            ok = true; // count as "ok" so it doesn't inflate the failed counter
+            skipReason = 'channel not integrated';
           }
-          // push / whatsapp — logged only (no integration yet)
-        } catch { ok = false; }
+        } catch (e) {
+          ok = false;
+          skipReason = e.message;
+          console.error('[Broadcast] channel error:', ch, e);
+        }
 
-        // Log each delivery
+        // Log each delivery attempt
         await DB.logNotification({
           subject:           title || 'Manual Broadcast',
           body:              content,
           channel:           ch,
           status:            ok ? 'sent' : 'failed',
-          recipient_id:      r.id || null,
+          recipient_id:      r.id   || null,
           recipient_name:    r.name || null,
-          recipient_contact: ch === 'sms' ? (r.phone || null) : (r.email || null),
+          recipient_contact: ch === 'sms'  ? (r.phone || null)
+                           : ch === 'push' ? (r.id ? `[push:${r.id}]` : `[no-account:${r.email}]`)
+                           : (r.email || null),
         });
 
-        ok ? sent++ : failed++;
+        ok ? sent++ : (skipReason.includes('not integrated') ? sent++ : failed++);
       }
     }
 
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send Broadcast'; }
 
-    if (failed === 0) Toast.success(`Sent to ${recipients.length} recipient(s) via ${channels.join(', ')}!`);
-    else Toast.warning(`${sent} sent, ${failed} failed.`);
+    // Summary toast — more informative than before
+    const pushFailed = pushResults.filter(p => !p.ok);
+    if (failed === 0 && pushFailed.length === 0) {
+      Toast.success(`✅ Sent to ${recipients.length} recipient(s) via ${channels.join(', ')}!`);
+    } else if (pushFailed.length > 0 && channels.includes('push')) {
+      const whoFailed = pushFailed[0].email || 'recipient';
+      Toast.warning(
+        `⚠️ Push failed for "${whoFailed}": ${pushFailed[0].error || 'no Supabase account linked'}. ` +
+        `The user must have a Supabase auth account whose id matches users.id.`
+      );
+    } else {
+      Toast.warning(`${sent} sent, ${failed} failed.`);
+    }
 
     // Reset
     document.getElementById('notif-content').value = '';
@@ -637,6 +741,55 @@ const NotificationsPage = {
   },
 
   // ─────────────────────────────────────────────────────────
+  // PUSH SEND — writes a row to parent_notifications table
+  // This is the "in-app push" mechanism: no FCM/service worker needed.
+  // The parent portal app polls / subscribes to this table via Supabase
+  // Realtime and displays the notification as an inbox item + badge.
+  //
+  // parentUserId — the Supabase auth.uid() of the parent (= users.id)
+  // subject      — short title shown as the notification header
+  // body         — full message body
+  // type         — semantic type: 'info'|'payment'|'absence'|'expiry'|'event'|'welcome'|'other'
+  // extra        — { rule_id, trigger_event, metadata }
+  // ─────────────────────────────────────────────────────────
+  async _sendPush(parentUserId, subject, body, type = 'info', extra = {}) {
+    if (!parentUserId) return { ok: false, error: 'No parentUserId provided' };
+    try {
+      const { error } = await DB.pushParentNotification({
+        parent_user_id: parentUserId,
+        subject,
+        body,
+        type,
+        rule_id:       extra.rule_id       || null,
+        trigger_event: extra.trigger_event || null,
+        metadata:      extra.metadata      || {},
+      });
+      if (error) {
+        console.warn('[Push] DB insert failed:', error.message);
+        return { ok: false, error: error.message };
+      }
+      return { ok: true };
+    } catch (e) {
+      console.error('[Push] unexpected error:', e);
+      return { ok: false, error: e.message };
+    }
+  },
+
+  // Helper: map a trigger event string to a notification type
+  _triggerToType(triggerEvent) {
+    const map = {
+      on_payment:          'payment',
+      on_renewal:          'payment',
+      on_expiry_reminder:  'expiry',
+      on_absent:           'absence',
+      on_event_registered: 'event',
+      on_student_created:  'welcome',
+      on_birthday:         'info',
+    };
+    return map[triggerEvent] || 'info';
+  },
+
+  // ─────────────────────────────────────────────────────────
   // RULES
   // ─────────────────────────────────────────────────────────
   async loadRules() {
@@ -742,6 +895,24 @@ const NotificationsPage = {
         </div>
 
         <div class="form-group">
+          <label class="form-label">
+            <i class="fas fa-bell" style="color:#f59e0b"></i>
+            Push / In-App Template
+            <span style="font-size:.7rem;color:var(--text-muted);font-weight:400;margin-left:4px">
+              — shown in parent portal inbox · leave blank to reuse Email template
+            </span>
+          </label>
+          <textarea name="push_template" class="form-textarea" rows="3"
+            placeholder="Hi {fname}, your {package} subscription expires on {expiry_date}. Tap to renew.">${Utils.esc(r?.push_template || '')}</textarea>
+          <div style="font-size:.7rem;color:var(--text-muted);margin-top:4px">
+            <i class="fas fa-info-circle"></i>
+            This message is written to the <code>parent_notifications</code> table in Supabase.
+            The parent portal reads this table via Realtime and shows it as an inbox notification + badge.
+            If blank, the Email template is used as fallback.
+          </div>
+        </div>
+
+        <div class="form-group">
           <label class="form-label">Available Placeholders <span style="font-size:10px;color:var(--text-muted)">(click to copy)</span></label>
           <div style="display:flex;flex-wrap:wrap;gap:6px">
             ${placeholders.map(p => `
@@ -822,6 +993,7 @@ const NotificationsPage = {
       channels:         fd.getAll('channels'),
       email_template:   fd.get('email_template')   || null,
       sms_template:     fd.get('sms_template')     || null,
+      push_template:    fd.get('push_template')    || null,
       recipient_target: fd.get('recipient_target') || 'student',
       is_active:        form.querySelector('[name="is_active"]')?.checked ?? true,
     };
@@ -882,13 +1054,24 @@ const NotificationsPage = {
       // Build list of contacts to send to
       let contacts = []; // [{name, email, phone, label}]
 
-      // Student contact (always available from trigger data)
+      // Student contact (always available from trigger data).
+      // userId = users.auth_id (= Supabase auth.uid()) — needed by parent_notifications RLS.
+      // data.auth_id is set by callers that have the full user row; otherwise we fetch it.
       const studentContact = {
-        name:  data.full_name || data.name || '',
-        email: data.email  || '',
-        phone: data.phone  || '',
-        label: 'student',
+        name:   data.full_name || data.name || '',
+        email:  data.email  || '',
+        phone:  data.phone  || '',
+        userId: data.auth_id || null,   // callers should pass auth_id; null = push skipped
+        label:  'student',
       };
+
+      // If student's auth_id wasn't passed, fetch it from the DB.
+      if (!studentContact.userId && (data.student_id || data.id)) {
+        try {
+          const { data: sRow } = await DB.getOne('users', data.student_id || data.id);
+          studentContact.userId = sRow?.auth_id || null;
+        } catch(e) { /* ignore */ }
+      }
 
       // Parent contact — look up via parent_id on the student record
       let parentContact = null;
@@ -899,10 +1082,13 @@ const NotificationsPage = {
             const { data: parent } = await DB.getOne('users', student.parent_id);
             if (parent) {
               parentContact = {
-                name:  parent.full_name || '',
-                email: parent.email     || '',
-                phone: parent.phone     || '',
-                label: 'parent',
+                name:   parent.full_name || '',
+                email:  parent.email     || '',
+                phone:  parent.phone     || '',
+                // CRITICAL: use auth_id (= Supabase auth.uid()) not parent.id.
+                // RLS on parent_notifications: auth.uid() = parent_user_id.
+                userId: parent.auth_id   || null,
+                label:  'parent',
               };
             }
           }
@@ -920,8 +1106,14 @@ const NotificationsPage = {
       }
 
       for (const ch of (rule.channels || ['email'])) {
-        const template = ch === 'email' ? rule.email_template : rule.sms_template;
+        // Pick the right template per channel
+        const template = ch === 'push'
+          ? (rule.push_template || rule.email_template)   // push falls back to email template
+          : ch === 'email' ? rule.email_template
+          : rule.sms_template;
+
         const subject  = rule.title || `Notification — Minds' Craft`;
+        const notifType = this._triggerToType(triggerEvent);
 
         for (const contact of contacts) {
           // Merge contact vars so {fname} etc. resolve to the actual recipient
@@ -942,13 +1134,46 @@ const NotificationsPage = {
           } else if (ch === 'email' && contact.email && this._ejsReady()) {
             const res = await this._sendEmail(contact.email, subject, body, contactVars.fname);
             ok = res.ok;
+          } else if (ch === 'push') {
+            // contact.userId MUST be users.auth_id (= Supabase auth.uid()).
+            // Without it the RLS policy on parent_notifications will block the parent read.
+            if (contact.userId) {
+              const res = await this._sendPush(
+                contact.userId,
+                subject,
+                body,
+                notifType,
+                {
+                  rule_id:       rule.id,
+                  trigger_event: triggerEvent,
+                  metadata:      {
+                    student: data.full_name || data.name || '',
+                    package: data.package  || '',
+                    amount:  data.amount   || '',
+                  },
+                }
+              );
+              ok = res.ok;
+              if (!ok) {
+                console.warn('[triggerRule] push INSERT failed for', contact.label, contact.email, res.error);
+              }
+            } else {
+              // auth_id not yet linked for this user — log as failed so it's visible in history
+              console.warn(
+                '[triggerRule] push skipped for', contact.label, contact.email,
+                '— users.auth_id is NULL. Run fix_push_notifications.html → Step 2.'
+              );
+              ok = false;
+            }
           }
 
           await DB.logNotification({
             rule_id:           rule.id,
             recipient_id:      data.student_id || data.id || null,
             recipient_name:    contact.name,
-            recipient_contact: ch === 'sms' ? contact.phone : contact.email,
+            recipient_contact: ch === 'sms' ? contact.phone
+                             : ch === 'push' ? `[push:${contact.userId || 'unknown'}]`
+                             : contact.email,
             channel:           ch,
             subject:           subject,
             body:              `[→ ${contact.label}] ` + body,
@@ -1060,8 +1285,11 @@ const NotificationsPage = {
           end_date:    Utils.formatDate(alloc.end_date),
         };
 
-        // Build contacts list based on recipient_target
-        const studentContact = { name: student.full_name, email: student.email, phone: student.phone, label: 'student' };
+        // Build contacts list based on recipient_target — now includes userId for push
+        const studentContact = {
+          name: student.full_name, email: student.email, phone: student.phone,
+          userId: student.id, label: 'student'
+        };
         let contacts = [studentContact];
 
         if (target === 'parent' || target === 'both') {
@@ -1070,7 +1298,10 @@ const NotificationsPage = {
             if (fullStudent?.parent_id) {
               const { data: parent } = await DB.getOne('users', fullStudent.parent_id);
               if (parent) {
-                const parentContact = { name: parent.full_name, email: parent.email, phone: parent.phone, label: 'parent' };
+                const parentContact = {
+                  name: parent.full_name, email: parent.email, phone: parent.phone,
+                  userId: parent.id, label: 'parent'
+                };
                 contacts = target === 'parent' ? [parentContact] : [studentContact, parentContact];
               }
             }
@@ -1086,8 +1317,10 @@ const NotificationsPage = {
               fname:     contact.name?.split(' ')[0] || baseVars.fname,
               full_name: contact.name || baseVars.full_name,
             };
-            const template = ch === 'email' ? rule.email_template : rule.sms_template;
-            const body     = this._fillTemplate(template || this._defaultExpiryMsg(vars), vars);
+            const template = ch === 'push'
+              ? (rule.push_template || rule.email_template)
+              : ch === 'email' ? rule.email_template : rule.sms_template;
+            const body = this._fillTemplate(template || this._defaultExpiryMsg(vars), vars);
 
             let ok = false;
             if (ch === 'sms' && contact.phone) {
@@ -1096,13 +1329,30 @@ const NotificationsPage = {
             } else if (ch === 'email' && contact.email && this._ejsReady()) {
               const res = await this._sendEmail(contact.email, subject, body, vars.fname);
               ok = res.ok;
+            } else if (ch === 'push' && contact.userId) {
+              const res = await this._sendPush(
+                contact.userId, subject, body, 'expiry',
+                {
+                  rule_id:       rule.id,
+                  trigger_event: 'on_expiry_reminder',
+                  metadata: {
+                    package:    alloc.package?.name || '',
+                    days_left:  vars.days_left,
+                    expiry_date: vars.expiry_date,
+                    student:    student.full_name || '',
+                  },
+                }
+              );
+              ok = res.ok;
             }
 
             await DB.logNotification({
               rule_id:           rule.id,
               recipient_id:      student.id,
               recipient_name:    contact.name,
-              recipient_contact: ch === 'sms' ? contact.phone : contact.email,
+              recipient_contact: ch === 'sms'  ? contact.phone
+                               : ch === 'push' ? `[push:${contact.userId}]`
+                               : contact.email,
               channel:           ch,
               subject:           '[EXPIRY REMINDER]',
               body:              `${alloc.end_date} — [→ ${contact.label}] ${body}`,
