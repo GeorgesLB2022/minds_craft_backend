@@ -1521,18 +1521,26 @@ const FinancialsPage = {
           Toast.success(isNew ? 'Package allocated & income recorded!' : 'Renewal saved — new allocation & transaction created!');
         }
 
-        // ── Fire on_payment notification rule ───────────────────────────────
-        if (student) {
-          NotificationsPage.triggerRule('on_payment', {
-            student_id: student.id   || studentId,
-            full_name:  student.full_name  || '',
-            email:      student.email      || '',
-            phone:      student.phone      || '',
-            package:    pkg?.name          || '',
+        // ── Fire on_payment / on_renewal notification rules ─────────────────
+        if (student && typeof NotificationsPage !== 'undefined') {
+          const triggerData = {
+            student_id: student.id        || studentId,
+            full_name:  student.full_name || '',
+            email:      student.email     || '',
+            phone:      student.phone     || '',
+            package:    pkg?.name         || '',
             amount:     data.price_paid,
-            start_date: data.start_date    || Utils.todayISO(),
-            end_date:   data.end_date      || '',
-          }).catch(err => console.warn('on_payment trigger failed:', err));
+            start_date: data.start_date   || Utils.todayISO(),
+            end_date:   data.end_date     || '',
+          };
+          // Always fire on_payment (covers both new and renewal)
+          NotificationsPage.triggerRule('on_payment', triggerData)
+            .catch(err => console.warn('on_payment trigger failed:', err));
+          // Also fire on_renewal for existing allocations being renewed
+          if (!isNew) {
+            NotificationsPage.triggerRule('on_renewal', triggerData)
+              .catch(err => console.warn('on_renewal trigger failed:', err));
+          }
         }
       } else {
         Toast.success(isNew ? 'Package allocated!' : 'Renewal saved!');
