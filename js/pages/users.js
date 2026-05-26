@@ -270,7 +270,7 @@ const UsersPage = {
                 </button>
               </div>
               <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin:0">
-                PNG, JPG, WebP · max 2 MB · stored as Base64
+                PNG, JPG, WebP · auto-compressed to 400×400px JPEG · max 10 MB input
               </p>
             </div>
           </div>
@@ -383,19 +383,50 @@ const UsersPage = {
   handlePhotoFile(input) {
     const file = input.files?.[0];
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) return Toast.error('Photo too large — max 2 MB');
+
+    // Accept any size — we compress down automatically.
+    // Hard reject only absurdly large files (> 10 MB) to avoid browser freeze.
+    if (file.size > 10 * 1024 * 1024) {
+      return Toast.error('Photo too large — max 10 MB accepted for auto-compression');
+    }
+
     const reader = new FileReader();
     reader.onload = e => {
-      const dataUrl = e.target.result;
-      // Update hidden field
-      const hidden = document.getElementById('user-avatar-url');
-      if (hidden) hidden.value = dataUrl;
-      // Update preview
-      const preview = document.getElementById('user-avatar-preview');
-      if (preview) {
-        preview.style.background = 'transparent';
-        preview.innerHTML = `<img src="${dataUrl}" style="width:100%;height:100%;object-fit:cover" />`;
-      }
+      const img = new Image();
+      img.onload = () => {
+        // ── Compress via canvas ──────────────────────────────────
+        // Target: max 400×400 px, JPEG quality 0.82
+        // Result is always well under 200 KB — safe for DB storage.
+        const MAX_PX  = 400;
+        const QUALITY = 0.82;
+        let { width, height } = img;
+
+        if (width > MAX_PX || height > MAX_PX) {
+          if (width > height) { height = Math.round(height * MAX_PX / width);  width = MAX_PX; }
+          else                { width  = Math.round(width  * MAX_PX / height); height = MAX_PX; }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width  = width;
+        canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', QUALITY);
+
+        // Show compressed size hint
+        const kb = Math.round(dataUrl.length * 0.75 / 1024);
+        Toast.success(`Photo compressed to ~${kb} KB (${width}×${height}px)`);
+
+        // Update hidden field + preview
+        const hidden  = document.getElementById('user-avatar-url');
+        const preview = document.getElementById('user-avatar-preview');
+        if (hidden)  hidden.value = dataUrl;
+        if (preview) {
+          preview.style.background = 'transparent';
+          preview.innerHTML = `<img src="${dataUrl}"
+            style="width:100%;height:100%;object-fit:cover" />`;
+        }
+      };
+      img.src = e.target.result;
     };
     reader.readAsDataURL(file);
   },
@@ -544,7 +575,138 @@ const UsersPage = {
         if (!resolvedPassword) delete data.app_password;
         result = await DB.updateUser(id, data);
         if (result.error) throw result.error;
-        Toast.success('User updated!');
+
+        // ── Sync Supabase Auth account for parent edits ──────────────────
+        // Cases handled:
+        // 1. No auth_id yet (email just added) → create via Admin API
+        // 2. auth_id exists but email changed   → delete old + create new via Admin API
+        // 3. auth_id exists, email unchanged    → verify login works, recreate if broken
+        if (isParent && data.email) {
+          try {
+            const { data: existingUser } = await DB.getOne('users', id);
+            const hasAuthId    = !!existingUser?.auth_id;
+            const emailChanged = hasAuthId && existingUser?.email !== data.email;
+            const pw = resolvedPassword
+                    || normalizedPhone
+                    || existingUser?.app_password
+                    || this._generateRandPassword();
+
+            if (!hasAuthId || emailChanged) {
+              // ── Case 1 & 2: no account yet, or email changed ────────────
+              if (emailChanged) {
+                // Delete old auth account before creating new one
+                try {
+                  await DB.client.auth.admin.deleteUser(existingUser.auth_id);
+                  console.info('[editParent] Deleted old auth account:', existingUser.auth_id);
+                } catch(delErr) {
+                  console.warn('[editParent] Could not delete old auth account:', delErr.message);
+                }
+              }
+
+              // Create fresh account via Admin API (no rate limit, auto-confirmed)
+              let newAuthId = null;
+              try {
+                const { data: adminData, error: adminErr } =
+                  await DB.client.auth.admin.createUser({
+                    email:          data.email,
+                    password:       pw,
+                    email_confirm:  true,
+                    user_metadata: {
+                      full_name:      data.full_name,
+                      user_type:      'parent',
+                      email_verified: true,
+                      phone_verified: false,
+                      public_user_id: id,
+                    },
+                  });
+
+                if (adminErr) throw adminErr;
+                newAuthId = adminData?.user?.id || null;
+              } catch (adminErr) {
+                // Admin API not available (anon key) — fall back to signUp
+                console.warn('[editParent] Admin API failed, falling back to signUp:', adminErr.message);
+                const fallback = await this._createParentAuthAccount(
+                  data.email, pw, data.full_name, id
+                );
+                newAuthId = fallback?.alreadyExists ? null : (fallback?.authId || null);
+              }
+
+              if (newAuthId) {
+                await DB.updateUser(id, { auth_id: newAuthId, app_password: pw });
+                this._showParentCredentials({
+                  name:          data.full_name,
+                  email:         data.email,
+                  password:      pw,
+                  alreadyExists: false,
+                  authId:        newAuthId,
+                  needsConfirm:  false, // Admin API auto-confirms
+                });
+              } else {
+                this._showParentCredentials({
+                  name:          data.full_name,
+                  email:         data.email,
+                  password:      pw,
+                  alreadyExists: true,
+                  authId:        null,
+                  needsConfirm:  false,
+                });
+              }
+
+            } else {
+              // ── Case 3: auth_id exists + email unchanged ─────────────────
+              // Quick login test to verify the account actually works
+              const { error: loginErr } = await DB.client.auth.signInWithPassword({
+                email:    data.email,
+                password: pw,
+              });
+              await DB.client.auth.signOut(); // don't disturb admin session
+
+              if (loginErr) {
+                // Account is broken (e.g. HTTP 500) — recreate via Admin API
+                console.warn('[editParent] Existing auth account broken:', loginErr.message, '— recreating…');
+                try {
+                  await DB.client.auth.admin.deleteUser(existingUser.auth_id);
+                } catch(e) { /* ignore */ }
+
+                let reAuthId = null;
+                try {
+                  const { data: reData, error: reErr } =
+                    await DB.client.auth.admin.createUser({
+                      email:         data.email,
+                      password:      pw,
+                      email_confirm: true,
+                      user_metadata: {
+                        full_name:      data.full_name,
+                        user_type:      'parent',
+                        email_verified: true,
+                        phone_verified: false,
+                        public_user_id: id,
+                      },
+                    });
+                  if (reErr) throw reErr;
+                  reAuthId = reData?.user?.id || null;
+                } catch(e) {
+                  console.warn('[editParent] Recreate failed:', e.message);
+                }
+
+                if (reAuthId) {
+                  await DB.updateUser(id, { auth_id: reAuthId, app_password: pw });
+                  Toast.success(`User updated! ✅ Broken auth account recreated automatically.`);
+                } else {
+                  Toast.warning(`User updated, but auth account could not be recreated. Use fix_parent_login.html.`);
+                }
+              } else {
+                // Login works fine — nothing to do
+                Toast.success('User updated! Portal account active & verified. ✅');
+              }
+            }
+          } catch (fetchErr) {
+            console.warn('[editParent] Auth sync error:', fetchErr.message);
+            Toast.success('User updated! (auth sync skipped)');
+          }
+        } else {
+          Toast.success('User updated!');
+        }
 
       } else {
         // ── CREATE new user ──────────────────────────────────────────────
@@ -615,8 +777,10 @@ const UsersPage = {
     const statusHtml = alreadyExists
       ? `<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
            border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#fbbf24">
-           ⚠️ A portal account already exists for this email — password was <strong>not</strong> changed.<br>
-           The existing password (phone number) still applies.
+           ⚠️ A Supabase Auth account already exists for this email — password was <strong>not</strong> changed.<br>
+           The existing password (phone number) still applies.<br><br>
+           <strong>Action required:</strong> run the SQL below in Supabase to link the <code>auth_id</code>
+           to this parent's record so push notifications work correctly.
          </div>`
       : authId
         ? `<div style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);
@@ -634,19 +798,33 @@ const UsersPage = {
              Open <strong>create_auth.html</strong> → Method B → enter the email below → copy SQL → run in Supabase.
            </div>`;
 
-    // Always show confirm SQL — always needed until Supabase auto-confirm is enabled
+    // Show confirm SQL + auth_id link SQL
     const safeEmail = (email || '').replace(/'/g, "''");
     const confirmSql =
-`-- Run in Supabase SQL Editor to confirm ${name}'s email:
--- https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new
+`-- ① Confirm email + link auth_id for ${name}
+-- Run in: https://supabase.com/dashboard/project/xiatsareoruybucwkpkc/sql/new
+
+-- Step 1: confirm email so parent can log in
 UPDATE auth.users
 SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
     updated_at = NOW()
 WHERE email = '${safeEmail}';
 
--- Verify
-SELECT email, email_confirmed_at IS NOT NULL AS confirmed
-FROM auth.users WHERE email = '${safeEmail}';`;
+-- Step 2: link auth_id from auth.users → public.users (enables push notifications)
+UPDATE public.users
+SET auth_id = (SELECT id FROM auth.users WHERE email = '${safeEmail}' LIMIT 1)
+WHERE email = '${safeEmail}'
+  AND auth_id IS NULL;
+
+-- ② Verify both steps
+SELECT
+  au.email,
+  au.email_confirmed_at IS NOT NULL AS email_confirmed,
+  pu.auth_id IS NOT NULL            AS auth_id_linked,
+  pu.auth_id
+FROM auth.users   au
+JOIN public.users pu ON pu.email = au.email
+WHERE au.email = '${safeEmail}';`;
 
     const html = `
       <div style="font-size:.88rem;line-height:1.7">
