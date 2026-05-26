@@ -209,6 +209,10 @@ const NotificationsPage = {
                   title="Run expiry check now">
                   <i class="fas fa-sync"></i> Run Expiry Check
                 </button>
+                <button class="btn btn-secondary btn-sm" onclick="NotificationsPage.runClassReminders()"
+                  title="Send class reminders for classes starting within 6 hours">
+                  <i class="fas fa-chalkboard-teacher"></i> Class Reminders
+                </button>
                 <button class="btn btn-ghost btn-sm" onclick="NotificationsPage.openCreateRule()">
                   <i class="fas fa-plus"></i>
                 </button>
@@ -254,6 +258,8 @@ const NotificationsPage = {
 
     // Run expiry check once per page load (quietly)
     this.runExpiryCheck(true);
+    // Run class reminders once per page load (quietly)
+    this.runClassReminders(true);
   },
 
   // ─────────────────────────────────────────────────────────
@@ -785,6 +791,7 @@ const NotificationsPage = {
       on_event_registered: 'event',
       on_student_created:  'welcome',
       on_birthday:         'info',
+      on_class_reminder:   'info',
     };
     return map[triggerEvent] || 'info';
   },
@@ -810,6 +817,7 @@ const NotificationsPage = {
           <div style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:2px">
             Trigger: ${Utils.esc(r.trigger_event)}
             ${r.trigger_event === 'on_expiry_reminder' ? ' · 2 days before end · once per expiry' : ''}
+            ${r.trigger_event === 'on_class_reminder'   ? ' · 6 hours before class · once per slot/day' : ''}
           </div>
           <div class="rule-card-channels" style="margin-top:6px">
             ${(r.channels || []).map(ch => `<span class="channel-badge channel-${ch}">${ch}</span>`).join('')}
@@ -847,10 +855,12 @@ const NotificationsPage = {
       { val: 'on_absent',           label: 'Student Marked Absent' },
       { val: 'on_event_registered', label: 'Event Registration' },
       { val: 'on_birthday',         label: 'Student Birthday' },
+      { val: 'on_class_reminder',   label: 'Class Reminder (6 hours before class, sent once per slot)' },
     ];
     const placeholders = [
       '{fname}','{lname}','{date}','{day_name}','{month_name}','{year}',
       '{package}','{expiry_date}','{days_left}','{start_date}','{end_date}','{amount}',
+      '{class_name}','{level_name}','{class_time}','{class_day}','{course_name}',
     ];
     const channels    = ['email','sms','push','whatsapp'];
     const ruleChannels = r?.channels || ['email'];
@@ -1369,6 +1379,230 @@ const NotificationsPage = {
       else Toast.info('Reminders already sent for all expiring subscriptions.');
     }
     await this.loadLogs();
+  },
+
+  // ─────────────────────────────────────────────────────────
+  // CLASS REMINDERS — 6 hours before the scheduled class slot
+  // Runs at page load (silently) and via the "Class Reminders" button.
+  // Deduplication: one log entry per student_id + level_id + day_of_week + date
+  // prevents sending twice on the same day for the same slot.
+  // ─────────────────────────────────────────────────────────
+  async runClassReminders(silent = false) {
+    // 1. Find active class-reminder rules
+    if (!this.rules || !this.rules.length) {
+      const { data: rules } = await DB.getNotificationRules();
+      this.rules = rules || [];
+    }
+    const reminderRules = this.rules.filter(
+      r => r.is_active && r.trigger_event === 'on_class_reminder'
+    );
+    if (!reminderRules.length) {
+      if (!silent) Toast.info('No active class-reminder rule found. Create one first.');
+      return;
+    }
+
+    // 2. What time window are we targeting?
+    //    We look for level_schedules whose start_time is within the NEXT 6 hours.
+    //    day_of_week stored as full English name: 'Monday', 'Tuesday', …
+    const now       = new Date();
+    const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const todayName = DAY_NAMES[now.getDay()];
+    const nowMins   = now.getHours() * 60 + now.getMinutes(); // minutes since midnight
+    const windowEnd = nowMins + 360;                          // +6 hours in minutes
+
+    // Helper: "HH:MM" → minutes since midnight
+    const toMins = t => {
+      if (!t) return null;
+      const [h, m] = t.split(':').map(Number);
+      return h * 60 + m;
+    };
+
+    // 3. Fetch all level_schedules for today's day-of-week
+    //    Supabase doesn't have a server-side day filter here, so we fetch all
+    //    (usually small table) and filter client-side.
+    const { data: allSlots } = await DB.getAll('level_schedules', {
+      select: 'id, level_id, day_of_week, start_time, end_time, label',
+    });
+
+    const todaySlots = (allSlots || []).filter(s => {
+      if (s.day_of_week !== todayName) return false;
+      const slotMins = toMins(s.start_time);
+      if (slotMins === null) return false;
+      // Slot starts in the next 6 hours (and hasn't started yet)
+      return slotMins >= nowMins && slotMins <= windowEnd;
+    });
+
+    if (!todaySlots.length) {
+      if (!silent) Toast.info(`No classes scheduled within the next 6 hours today (${todayName}).`);
+      return;
+    }
+
+    // 4. For each upcoming slot, find enrolled students
+    //    enrollments → student → parent
+    //    Use "[CLASS REMINDER]" as subject key for dedup (like expiry uses "[EXPIRY REMINDER]")
+    const todayDateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    // Fetch dedup logs: class reminder logs sent today for the same slot
+    const { data: recentLogs } = await DB.getAll('notification_logs', {
+      filter: { subject: '[CLASS REMINDER]' },
+      limit: 5000,
+    });
+    // Key: "studentId__levelId__dayOfWeek__YYYY-MM-DD"
+    const alreadySent = new Set(
+      (recentLogs || []).map(l => l.body?.split(' | ')[0]).filter(Boolean)
+    );
+
+    let sent = 0;
+    const pad2 = n => String(n).padStart(2, '0');
+    const fmtTime = t => {
+      if (!t) return '';
+      const [h, m] = t.split(':').map(Number);
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      const hh   = h % 12 || 12;
+      return `${hh}:${pad2(m)} ${ampm}`;
+    };
+
+    for (const rule of reminderRules) {
+      const target = rule.recipient_target || 'parent'; // default to parent for class reminders
+
+      for (const slot of todaySlots) {
+        // Fetch level info (name + course name)
+        const { data: levelData } = await DB.getOne('levels', slot.level_id);
+        // Fetch course name via level.course_id
+        let courseName = '';
+        if (levelData?.course_id) {
+          const { data: courseData } = await DB.getOne('courses', levelData.course_id);
+          courseName = courseData?.name || '';
+        }
+        const levelName = levelData?.name || 'Class';
+        const classTime = fmtTime(slot.start_time);
+        const classDay  = slot.day_of_week;
+
+        // Fetch enrolled students for this level
+        const { data: enrollments } = await DB.getLevelEnrollments(slot.level_id);
+        if (!enrollments || !enrollments.length) continue;
+
+        for (const enr of enrollments) {
+          const student = enr.student;
+          if (!student) continue;
+
+          const dedupKey = `${student.id}__${slot.level_id}__${slot.day_of_week}__${todayDateStr}`;
+          if (alreadySent.has(dedupKey)) continue;
+
+          // Build base template vars
+          const baseVars = {
+            fname:       student.full_name?.split(' ')[0] || '',
+            lname:       student.full_name?.split(' ').slice(1).join(' ') || '',
+            full_name:   student.full_name || '',
+            level_name:  levelName,
+            class_name:  levelName,          // alias
+            course_name: courseName,
+            class_time:  classTime,
+            class_day:   classDay,
+          };
+
+          // Resolve parent contact if needed
+          let parentContact = null;
+          if (target === 'parent' || target === 'both') {
+            try {
+              const { data: fullStudent } = await DB.getOne('users', student.id);
+              if (fullStudent?.parent_id) {
+                const { data: parent } = await DB.getOne('users', fullStudent.parent_id);
+                if (parent) {
+                  parentContact = {
+                    name:   parent.full_name || '',
+                    email:  parent.email     || '',
+                    phone:  parent.phone     || '',
+                    userId: parent.auth_id   || null,
+                    label:  'parent',
+                  };
+                }
+              }
+            } catch (e) { /* ignore */ }
+          }
+
+          const studentContact = {
+            name:   student.full_name || '',
+            email:  student.email     || '',
+            phone:  student.phone     || '',
+            userId: student.auth_id   || null,
+            label:  'student',
+          };
+
+          let contacts = [];
+          if (target === 'parent')       contacts = [parentContact || studentContact];
+          else if (target === 'student') contacts = [studentContact];
+          else                           contacts = [studentContact, ...(parentContact ? [parentContact] : [])];
+
+          for (const ch of (rule.channels || ['push'])) {
+            const template = ch === 'push'
+              ? (rule.push_template || rule.email_template)
+              : ch === 'email' ? rule.email_template
+              : rule.sms_template;
+
+            const subject = rule.title || "Class Reminder — Minds' Craft";
+
+            for (const contact of contacts) {
+              const vars = {
+                ...baseVars,
+                fname:     contact.name?.split(' ')[0] || baseVars.fname,
+                full_name: contact.name || baseVars.full_name,
+              };
+              const defaultMsg = `Hi ${vars.fname}, reminder: ${vars.full_name.split(' ')[0]}'s ${vars.level_name} class` +
+                (vars.course_name ? ` (${vars.course_name})` : '') +
+                ` is today at ${vars.class_time}. See you there! — Minds' Craft`;
+              const body = this._fillTemplate(template || defaultMsg, vars);
+
+              let ok = false;
+              if (ch === 'sms' && contact.phone) {
+                const res = await this._sendSMS(contact.phone, body);
+                ok = res.ok;
+              } else if (ch === 'email' && contact.email && this._ejsReady()) {
+                const res = await this._sendEmail(contact.email, subject, body, vars.fname);
+                ok = res.ok;
+              } else if (ch === 'push' && contact.userId) {
+                const res = await this._sendPush(
+                  contact.userId, subject, body, 'info',
+                  {
+                    rule_id:       rule.id,
+                    trigger_event: 'on_class_reminder',
+                    metadata: {
+                      student:    student.full_name || '',
+                      level_name: levelName,
+                      class_time: classTime,
+                      class_day:  classDay,
+                    },
+                  }
+                );
+                ok = res.ok;
+              }
+
+              // Log with dedup key embedded in body prefix
+              await DB.logNotification({
+                rule_id:           rule.id,
+                recipient_id:      student.id,
+                recipient_name:    contact.name,
+                recipient_contact: ch === 'sms'  ? contact.phone
+                                 : ch === 'push' ? `[push:${contact.userId || 'unknown'}]`
+                                 : contact.email,
+                channel:           ch,
+                subject:           '[CLASS REMINDER]',
+                body:              `${dedupKey} | [→ ${contact.label}] ${body}`,
+                status:            ok ? 'sent' : 'failed',
+              });
+              sent++;
+              alreadySent.add(dedupKey); // prevent double-log within same run
+            }
+          }
+        }
+      }
+    }
+
+    if (!silent) {
+      if (sent > 0) Toast.success(`Class reminders sent: ${sent} notification(s).`);
+      else Toast.info('No new class reminders to send (already sent or no enrollments found).');
+    }
+    if (sent > 0) await this.loadLogs();
   },
 
   _fillTemplate(template, vars) {
