@@ -183,6 +183,13 @@ const TrainersPage = {
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
             ${Utils.statusBadge(t.status)}
             ${this._starsHTML(t.rating)}
+            ${t.priority != null
+              ? `<span title="Display priority" style="font-size:.68rem;font-weight:700;
+                   color:var(--text-muted);background:var(--bg-card2);border:1px solid var(--border);
+                   border-radius:99px;padding:1px 8px;letter-spacing:.03em">
+                   <i class="fas fa-sort-numeric-up" style="font-size:.6rem"></i> #${t.priority}
+                 </span>`
+              : ''}
           </div>
         </div>
 
@@ -340,6 +347,25 @@ const TrainersPage = {
           </div>
         </div>
 
+        <!-- ── Priority ── -->
+        <div class="form-group">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px">
+            <i class="fas fa-sort-numeric-up" style="color:var(--brand-primary)"></i>
+            Display Priority
+            <span style="font-size:.72rem;color:var(--text-muted);font-weight:400">
+              — lower number = shown first in external apps
+            </span>
+          </label>
+          <input type="number" name="priority" class="form-input"
+            min="1" max="999" step="1"
+            placeholder="e.g. 1 = first, 2 = second…"
+            value="${t?.priority ?? ''}" 
+            style="max-width:160px" />
+          <p style="font-size:.72rem;color:var(--text-muted);margin-top:4px">
+            Used to order trainers in the parent portal and other apps. Leave blank for no specific order.
+          </p>
+        </div>
+
         <!-- ── Rating ── -->
         <div class="form-group">
           <label class="form-label" style="display:flex;align-items:center;justify-content:space-between">
@@ -469,6 +495,7 @@ const TrainersPage = {
     e.preventDefault();
     const fd = new FormData(e.target);
 
+    const priorityRaw = fd.get('priority');
     const data = {
       full_name:   fd.get('full_name'),
       title:       fd.get('title')       || null,
@@ -481,6 +508,7 @@ const TrainersPage = {
       description: fd.get('description') || null,
       rating:      fd.get('rating')      ? parseFloat(fd.get('rating')) : null,
       avatar_url:  fd.get('avatar_url')  || null,
+      priority:    priorityRaw !== '' && priorityRaw !== null ? parseInt(priorityRaw) : null,
     };
 
     // Don't store empty string for avatar_url
