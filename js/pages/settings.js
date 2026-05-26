@@ -44,6 +44,9 @@ const SettingsPage = {
               <li class="settings-nav-item" onclick="SettingsPage.switchSection('backup', this)">
                 <i class="fas fa-cloud-download-alt"></i> Data & Backups
               </li>
+              <li class="settings-nav-item" onclick="SettingsPage.switchSection('about', this)">
+                <i class="fas fa-info-circle"></i> About Us
+              </li>
             </ul>
           </div>
         </div>
@@ -80,6 +83,7 @@ const SettingsPage = {
       case 'security': panel.innerHTML = this.securityHTML(); break;
       case 'database': panel.innerHTML = this.databaseHTML(); break;
       case 'backup': panel.innerHTML = this.backupHTML(); break;
+      case 'about': this.renderAbout(panel); break;
     }
   },
 
@@ -715,5 +719,197 @@ ALTER TABLE student_allocations ADD COLUMN IF NOT EXISTS notes TEXT;
     this.roles = roles || [];
     const panel = document.getElementById('settings-panel');
     if (panel) await this.renderRoles(panel);
+  },
+
+  // ── ABOUT US ────────────────────────────────────────────────────────────────
+  async renderAbout(panel) {
+    panel.innerHTML = `<div class="page-loading"><i class="fas fa-spinner fa-spin"></i></div>`;
+    const { data, error } = await DB.getAboutUs();
+    const a = data || {};
+    if (error) console.warn('getAboutUs error:', error.message);
+
+    // Branches: stored as JSON array [{name,address,city}]
+    const branches = Array.isArray(a.branches) ? a.branches
+      : (a.branches ? JSON.parse(a.branches) : [{ name: '', address: '', city: '' }]);
+
+    panel.innerHTML = `
+      <form id="about-form" onsubmit="SettingsPage.saveAbout(event)">
+
+        <!-- ── Identity ── -->
+        <div class="card" style="margin-bottom:1rem">
+          <div class="card-header"><div class="card-title"><i class="fas fa-building" style="color:var(--brand-primary)"></i> Center Identity</div></div>
+
+          <div class="form-group">
+            <label class="form-label">Official Center Name *</label>
+            <input type="text" name="center_official_name" class="form-input"
+              placeholder="e.g. Minds' Craft Learning Center"
+              value="${Utils.esc(a.center_official_name || '')}" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Slogan / Tagline</label>
+            <input type="text" name="slogan" class="form-input"
+              placeholder="e.g. Empowering Young Minds"
+              value="${Utils.esc(a.slogan || '')}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Mission Statement</label>
+            <textarea name="mission" class="form-textarea" rows="3"
+              placeholder="Our mission is to…">${Utils.esc(a.mission || '')}</textarea>
+          </div>
+        </div>
+
+        <!-- ── Branches ── -->
+        <div class="card" style="margin-bottom:1rem">
+          <div class="card-header">
+            <div class="card-title"><i class="fas fa-map-marker-alt" style="color:var(--brand-primary)"></i> Branch Details</div>
+            <button type="button" class="btn btn-secondary btn-sm" onclick="SettingsPage.addBranch()">
+              <i class="fas fa-plus"></i> Add Branch
+            </button>
+          </div>
+          <div id="branches-list">
+            ${branches.map((b, i) => SettingsPage._branchRowHTML(b, i)).join('')}
+          </div>
+        </div>
+
+        <!-- ── Contact Us ── -->
+        <div class="card" style="margin-bottom:1rem">
+          <div class="card-header"><div class="card-title"><i class="fas fa-phone-alt" style="color:var(--brand-primary)"></i> Contact Information</div></div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label"><i class="fas fa-phone" style="width:16px"></i> Phone</label>
+              <input type="tel" name="contact_phone" class="form-input"
+                placeholder="+961 X XXX XXX"
+                value="${Utils.esc(a.contact_phone || '')}" />
+            </div>
+            <div class="form-group">
+              <label class="form-label"><i class="fab fa-whatsapp" style="width:16px;color:#25d366"></i> WhatsApp</label>
+              <input type="tel" name="contact_whatsapp" class="form-input"
+                placeholder="+961 X XXX XXX"
+                value="${Utils.esc(a.contact_whatsapp || '')}" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label"><i class="fas fa-envelope" style="width:16px"></i> Email</label>
+            <input type="email" name="contact_email" class="form-input"
+              placeholder="info@mindcraft.com"
+              value="${Utils.esc(a.contact_email || '')}" />
+          </div>
+        </div>
+
+        <!-- ── Social Media ── -->
+        <div class="card" style="margin-bottom:1rem">
+          <div class="card-header"><div class="card-title"><i class="fas fa-share-alt" style="color:var(--brand-primary)"></i> Social Media</div></div>
+          <div class="form-group">
+            <label class="form-label"><i class="fab fa-instagram" style="width:16px;color:#e1306c"></i> Instagram URL</label>
+            <input type="url" name="instagram_url" class="form-input"
+              placeholder="https://www.instagram.com/youraccount"
+              value="${Utils.esc(a.instagram_url || '')}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label"><i class="fab fa-facebook" style="width:16px;color:#1877f2"></i> Facebook URL</label>
+            <input type="url" name="facebook_url" class="form-input"
+              placeholder="https://www.facebook.com/yourpage"
+              value="${Utils.esc(a.facebook_url || '')}" />
+          </div>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:.5rem">
+          <button type="submit" class="btn btn-primary">
+            <i class="fas fa-save"></i> Save About Us
+          </button>
+        </div>
+
+      </form>
+    `;
+  },
+
+  _branchRowHTML(b = {}, i = 0) {
+    return `
+      <div class="branch-row" data-idx="${i}"
+        style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;
+               align-items:end;padding:10px 0;border-bottom:1px solid var(--border);">
+        <div class="form-group" style="margin:0">
+          ${i === 0 ? '<label class="form-label">Branch Name</label>' : ''}
+          <input type="text" name="branch_name_${i}" class="form-input"
+            placeholder="Main Branch"
+            value="${Utils.esc(b.name || '')}" />
+        </div>
+        <div class="form-group" style="margin:0">
+          ${i === 0 ? '<label class="form-label">Address</label>' : ''}
+          <input type="text" name="branch_address_${i}" class="form-input"
+            placeholder="Street, Building"
+            value="${Utils.esc(b.address || '')}" />
+        </div>
+        <div class="form-group" style="margin:0">
+          ${i === 0 ? '<label class="form-label">City</label>' : ''}
+          <input type="text" name="branch_city_${i}" class="form-input"
+            placeholder="Beirut"
+            value="${Utils.esc(b.city || '')}" />
+        </div>
+        <div style="${i === 0 ? 'padding-top:22px' : ''}">
+          <button type="button" class="btn btn-danger btn-icon btn-sm"
+            onclick="SettingsPage.removeBranch(${i})"
+            title="Remove branch">
+            <i class="fas fa-trash"></i>
+          </button>
+        </div>
+      </div>
+    `;
+  },
+
+  addBranch() {
+    const list = document.getElementById('branches-list');
+    if (!list) return;
+    const idx = list.querySelectorAll('.branch-row').length;
+    list.insertAdjacentHTML('beforeend', this._branchRowHTML({}, idx));
+  },
+
+  removeBranch(idx) {
+    const row = document.querySelector(`.branch-row[data-idx="${idx}"]`);
+    if (row) row.remove();
+    // Re-index remaining rows so names stay sequential
+    document.querySelectorAll('.branch-row').forEach((r, i) => {
+      r.dataset.idx = i;
+      r.querySelectorAll('input').forEach(inp => {
+        inp.name = inp.name.replace(/_\d+$/, `_${i}`);
+      });
+    });
+  },
+
+  async saveAbout(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+
+    // Collect branches
+    const rows = document.querySelectorAll('.branch-row');
+    const branches = [];
+    rows.forEach((r, i) => {
+      const name    = fd.get(`branch_name_${i}`)?.trim()    || '';
+      const address = fd.get(`branch_address_${i}`)?.trim() || '';
+      const city    = fd.get(`branch_city_${i}`)?.trim()    || '';
+      if (name || address || city) branches.push({ name, address, city });
+    });
+
+    const payload = {
+      center_official_name: fd.get('center_official_name')?.trim() || null,
+      slogan:               fd.get('slogan')?.trim()               || null,
+      mission:              fd.get('mission')?.trim()              || null,
+      branches:             branches,
+      contact_phone:        fd.get('contact_phone')?.trim()        || null,
+      contact_whatsapp:     fd.get('contact_whatsapp')?.trim()     || null,
+      contact_email:        fd.get('contact_email')?.trim()        || null,
+      instagram_url:        fd.get('instagram_url')?.trim()        || null,
+      facebook_url:         fd.get('facebook_url')?.trim()         || null,
+    };
+
+    const btn = e.target.querySelector('[type="submit"]');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…'; }
+
+    const { error } = await DB.saveAboutUs(payload);
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save About Us'; }
+
+    if (error) return Toast.error(error.message || 'Failed to save About Us');
+    Toast.success('About Us saved!');
   },
 };
