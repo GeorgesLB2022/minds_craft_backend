@@ -187,6 +187,22 @@ const AttendancePage = {
   },
 
   // ─────────────────────────────────────────────────────────────────────────
+  // DATE HELPERS — used in Period Summary table and detail modal
+  // ─────────────────────────────────────────────────────────────────────────
+  _fmtDate(dateStr) {
+    if (!dateStr) return '';
+    const [y, m, d] = dateStr.split('-');
+    return `${d}/${m}/${y}`;
+  },
+
+  _dayName(dateStr) {
+    if (!dateStr) return '';
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const dt = new Date(dateStr + 'T00:00:00');
+    return days[dt.getDay()];
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
   // LOAD ALL COURSES + LEVELS ONCE
   // ─────────────────────────────────────────────────────────────────────────
   async loadAllData() {
@@ -881,9 +897,24 @@ const AttendancePage = {
       const byStudent = {};
       filtered.forEach(a => {
         if (!byStudent[a.student_id]) {
-          byStudent[a.student_id] = { name: a.student?.full_name, present: 0, late: 0, absent: 0 };
+          byStudent[a.student_id] = {
+            name:         a.student?.full_name,
+            present:      0, late: 0, absent: 0,
+            dates_present: [],
+            dates_late:    [],
+            dates_absent:  [],
+          };
         }
         byStudent[a.student_id][a.status]++;
+        if (a.status === 'present') byStudent[a.student_id].dates_present.push(a.date);
+        else if (a.status === 'late')    byStudent[a.student_id].dates_late.push(a.date);
+        else if (a.status === 'absent')  byStudent[a.student_id].dates_absent.push(a.date);
+      });
+      // Sort dates ascending within each bucket
+      Object.values(byStudent).forEach(v => {
+        v.dates_present.sort();
+        v.dates_late.sort();
+        v.dates_absent.sort();
       });
 
       const rows = Object.entries(byStudent);
@@ -908,16 +939,38 @@ const AttendancePage = {
       document.getElementById('att-absent').textContent  = totalAbsent;
 
       const _periodTerm = (document.getElementById('period-search')?.value || '').toLowerCase().trim();
-      tbody.innerHTML = rows.map(([, v]) => {
+      const _fmtDate = d => this._fmtDate(d);
+      const _dayName = d => this._dayName(d);
+      // Store full data for modal access
+      this._periodRows = byStudent;
+
+      tbody.innerHTML = rows.map(([sid, v]) => {
         const total = v.present + v.late + v.absent;
         const pct   = total > 0 ? Math.round(((v.present + v.late) / total) * 100) : 0;
         const name  = v.name || 'Unknown';
         return `
-          <tr data-student-name="${name.toLowerCase()}" style="${_periodTerm && !name.toLowerCase().includes(_periodTerm) ? 'display:none' : ''}">
-            <td><strong>${Utils.esc(name)}</strong></td>
-            <td><span style="color:var(--brand-primary);font-weight:600">${v.present}</span></td>
-            <td><span style="color:var(--brand-warning);font-weight:600">${v.late}</span></td>
-            <td><span style="color:var(--brand-danger);font-weight:600">${v.absent}</span></td>
+          <tr data-student-name="${name.toLowerCase()}"
+            style="${_periodTerm && !name.toLowerCase().includes(_periodTerm) ? 'display:none' : ''}
+                   cursor:pointer"
+            onclick="AttendancePage.openPeriodDetail('${sid}')">
+            <td>
+              <strong>${Utils.esc(name)}</strong>
+              <div style="font-size:.7rem;color:var(--text-muted);margin-top:2px">
+                <i class="fas fa-calendar-alt" style="opacity:.5"></i> click to see dates
+              </div>
+            </td>
+            <td>
+              <span style="color:var(--brand-primary);font-weight:600">${v.present}</span>
+              ${v.dates_present.length ? `<div style="font-size:.68rem;color:var(--text-muted);margin-top:2px">${v.dates_present.map(d=>_fmtDate(d)).join('<br>')}</div>` : ''}
+            </td>
+            <td>
+              <span style="color:var(--brand-warning);font-weight:600">${v.late}</span>
+              ${v.dates_late.length ? `<div style="font-size:.68rem;color:var(--text-muted);margin-top:2px">${v.dates_late.map(d=>_fmtDate(d)).join('<br>')}</div>` : ''}
+            </td>
+            <td>
+              <span style="color:var(--brand-danger);font-weight:600">${v.absent}</span>
+              ${v.dates_absent.length ? `<div style="font-size:.68rem;color:var(--text-muted);margin-top:2px">${v.dates_absent.map(d=>_fmtDate(d)).join('<br>')}</div>` : ''}
+            </td>
             <td>
               <div style="display:flex;align-items:center;gap:8px">
                 <div class="progress-bar-wrap" style="width:80px">
@@ -933,6 +986,87 @@ const AttendancePage = {
       console.error(err);
       Toast.error('Failed to load period attendance');
     }
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PERIOD DETAIL MODAL — shows exact dates per status for one student
+  // ─────────────────────────────────────────────────────────────────────────
+  openPeriodDetail(studentId) {
+    const v = this._periodRows?.[studentId];
+    if (!v) return;
+
+    const total = v.present + v.late + v.absent;
+    const pct   = total > 0 ? Math.round(((v.present + v.late) / total) * 100) : 0;
+    const pctColor = pct >= 80 ? 'var(--brand-success,#22c55e)'
+                   : pct >= 60 ? 'var(--brand-warning,#f59e0b)'
+                   : 'var(--brand-danger,#ef4444)';
+
+    const fmtD = d => this._fmtDate(d);
+    const dayN  = d => this._dayName(d);
+    const renderDates = (dates, color, icon) => {
+      if (!dates.length) return `<span style="color:var(--text-muted);font-size:.8rem">— none —</span>`;
+      return dates.map(d => `
+        <div style="display:flex;align-items:center;gap:.5rem;padding:.3rem .5rem;
+          border-radius:6px;background:var(--bg-tertiary,#1e1e35);margin-bottom:.3rem">
+          <i class="fas ${icon}" style="color:${color};font-size:.75rem;width:14px"></i>
+          <span style="font-weight:600;font-size:.83rem">${fmtD(d)}</span>
+          <span style="color:var(--text-muted);font-size:.75rem;margin-left:auto">${dayN(d)}</span>
+        </div>`).join('');
+    };
+
+    const html = `
+      <!-- Stats bar -->
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin-bottom:1.2rem">
+        <div style="text-align:center;padding:.7rem;border-radius:8px;background:var(--bg-tertiary,#1e1e35)">
+          <div style="font-size:1.4rem;font-weight:700;color:var(--brand-primary)">${v.present}</div>
+          <div style="font-size:.72rem;color:var(--text-muted)">Present</div>
+        </div>
+        <div style="text-align:center;padding:.7rem;border-radius:8px;background:var(--bg-tertiary,#1e1e35)">
+          <div style="font-size:1.4rem;font-weight:700;color:var(--brand-warning,#f59e0b)">${v.late}</div>
+          <div style="font-size:.72rem;color:var(--text-muted)">Late</div>
+        </div>
+        <div style="text-align:center;padding:.7rem;border-radius:8px;background:var(--bg-tertiary,#1e1e35)">
+          <div style="font-size:1.4rem;font-weight:700;color:var(--brand-danger,#ef4444)">${v.absent}</div>
+          <div style="font-size:.72rem;color:var(--text-muted)">Absent</div>
+        </div>
+        <div style="text-align:center;padding:.7rem;border-radius:8px;background:var(--bg-tertiary,#1e1e35)">
+          <div style="font-size:1.4rem;font-weight:700;color:${pctColor}">${pct}%</div>
+          <div style="font-size:.72rem;color:var(--text-muted)">Rate</div>
+        </div>
+      </div>
+
+      <!-- Date lists -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.8rem">
+
+        <!-- Present -->
+        <div>
+          <div style="font-size:.78rem;font-weight:700;color:var(--brand-primary);
+            margin-bottom:.5rem;display:flex;align-items:center;gap:.4rem">
+            <i class="fas fa-check-circle"></i> Present (${v.present})
+          </div>
+          ${renderDates(v.dates_present, 'var(--brand-primary)', 'fa-check-circle')}
+        </div>
+
+        <!-- Late -->
+        <div>
+          <div style="font-size:.78rem;font-weight:700;color:var(--brand-warning,#f59e0b);
+            margin-bottom:.5rem;display:flex;align-items:center;gap:.4rem">
+            <i class="fas fa-clock"></i> Late (${v.late})
+          </div>
+          ${renderDates(v.dates_late, 'var(--brand-warning,#f59e0b)', 'fa-clock')}
+        </div>
+
+        <!-- Absent -->
+        <div>
+          <div style="font-size:.78rem;font-weight:700;color:var(--brand-danger,#ef4444);
+            margin-bottom:.5rem;display:flex;align-items:center;gap:.4rem">
+            <i class="fas fa-times-circle"></i> Absent (${v.absent})
+          </div>
+          ${renderDates(v.dates_absent, 'var(--brand-danger,#ef4444)', 'fa-times-circle')}
+        </div>
+      </div>
+    `;
+    Modal.open(`📋 ${Utils.esc(v.name || 'Student')} — Attendance Detail`, html, { size: 'lg' });
   },
 
   // ─────────────────────────────────────────────────────────────────────────
