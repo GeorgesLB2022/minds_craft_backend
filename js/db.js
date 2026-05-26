@@ -643,6 +643,33 @@ const DB = {
     return this.getAll('roles', { order: 'name' });
   },
 
+  // ─────────────────────────────────────────────
+  // ABOUT US
+  // ─────────────────────────────────────────────
+  async getAboutUs() {
+    if (!_supabase) return { data: null, error: new Error('Not initialized') };
+    const { data, error } = await _supabase
+      .from('about_us')
+      .select('*')
+      .eq('id', 1)
+      .single();
+    return { data, error };
+  },
+
+  async saveAboutUs(payload) {
+    if (!_supabase) return { error: new Error('Not initialized') };
+    // branches is an array — store as JSONB
+    const row = {
+      id: 1,
+      ...payload,
+      branches: payload.branches ? JSON.stringify(payload.branches) : '[]',
+    };
+    const { data, error } = await _supabase
+      .from('about_us')
+      .upsert(row, { onConflict: 'id' });
+    return { data, error };
+  },
+
   async createRole(data) { return this.insert('roles', data); },
   async updateRole(id, data) { return this.update('roles', id, data); },
   async deleteRole(id) { return this.remove('roles', id); },
