@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS trainers (
   description  TEXT,                                          -- Bio / specialties
   rating       NUMERIC(3,1) CHECK (rating IS NULL OR (rating >= 0 AND rating <= 5)),  -- 0.0–5.0
   avatar_url   TEXT,                                          -- Profile photo (base64 data URL or external URL)
+  priority     INTEGER,                                        -- Display order priority (1 = first, 2 = second…)
   created_at   TIMESTAMPTZ DEFAULT NOW(),
   updated_at   TIMESTAMPTZ DEFAULT NOW()
 );
@@ -692,6 +693,42 @@ CREATE POLICY "Admin full access on parent_notifications"
   USING (true)
   WITH CHECK (true);
 
+-- ============================================================
+-- ABOUT US TABLE
+-- ============================================================
+CREATE TABLE IF NOT EXISTS about_us (
+  id                   INTEGER PRIMARY KEY DEFAULT 1,   -- singleton row (always id=1)
+  center_official_name TEXT,
+  slogan               TEXT,
+  mission              TEXT,
+  branches             JSONB DEFAULT '[]',              -- [{name, address, city}, …]
+  contact_phone        TEXT,
+  contact_whatsapp     TEXT,
+  contact_email        TEXT,
+  instagram_url        TEXT,
+  facebook_url         TEXT,
+  created_at           TIMESTAMPTZ DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ DEFAULT NOW()
+);
+
+INSERT INTO about_us (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+
+ALTER TABLE about_us ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "Authenticated users can do everything" ON about_us;
+CREATE POLICY "Authenticated users can do everything"
+  ON about_us FOR ALL
+  TO authenticated
+  USING (true) WITH CHECK (true);
+
+-- Allow parent portal (anon after signIn) to READ about_us (public info)
+DROP POLICY IF EXISTS "Public read about_us" ON about_us;
+CREATE POLICY "Public read about_us"
+  ON about_us FOR SELECT
+  TO anon
+  USING (true);
+
+-- ============================================================
+-- ============================================================
 -- Parent portal users can only SELECT their own rows and UPDATE is_read
 -- (The parent portal uses the anon key after sign-in via supabase.auth.signIn,
 --  so auth.uid() is set automatically for each request)
