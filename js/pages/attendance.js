@@ -257,9 +257,17 @@ const AttendancePage = {
     const hintEl  = document.getElementById('att-weekday-hint');
     if (hintEl) hintEl.textContent = weekday ? `(${weekday})` : '';
 
+    // ── Check BOTH new level_schedules slots AND legacy day_of_week field ──
+    // A level is "on this day" if it has at least one slot on the weekday (new model)
+    // OR if its legacy day_of_week field matches (old model).
     const courseIdsForDay = new Set(
       this._allLevels
-        .filter(l => l.day_of_week === weekday && l.status !== 'inactive')
+        .filter(l => {
+          if (l.status === 'inactive') return false;
+          const slots = this._levelSchedules[l.id] || [];
+          if (slots.length > 0) return slots.some(s => s.day_of_week === weekday);
+          return l.day_of_week === weekday;   // legacy fallback
+        })
         .map(l => l.course_id)
     );
 
