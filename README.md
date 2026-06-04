@@ -114,10 +114,14 @@ All tables have **Row Level Security (RLS)** — only authenticated users can re
   - Schedule (day, start/end time, duration)
   - Trainer assignment
   - Age range, capacity, acquisitions, prerequisites
-- **Student Enrollment Panel** (new):
+- **Student Enrollment Panel** (updated):
   - Click **Manage Students** on any level to open/close the enrollment panel
   - See all enrolled students with their status and enrollment date
   - **Enroll new students** via a searchable modal — only shows active, not-yet-enrolled students
+  - **Start Date** (mandatory, defaults to today) set on enrollment
+  - **End Date** (optional) — marks when the student completed this level
+  - **Notes** field — inline editable per enrollment
+  - **Assessment button** — navigates directly to Student Progress for that student
   - **Change enrollment status** (active / inactive / completed / dropped) inline
   - **Remove students** from a level (attendance history is preserved)
 
@@ -194,10 +198,27 @@ Email uses **EmailJS** with Gmail SMTP via an App Password (no OAuth, no domain 
 - No configuration needed — works out of the box
 
 ### Student Progress
-- Per-student skill assessment grid (5-point scale)
-- Skill categories: Core Robotics, Programming, Creativity, Soft Skills
-- Progress radar chart
-- Level progression tracking
+- **5-domain assessment table**: Technical Skills / Logical & Computational Thinking / Creativity & Design / Understanding & Communication / Collaboration & Independence
+- **4 proficiency levels** per domain: Emerging / Developing / Proficient / Advanced (radio buttons)
+- **Per-domain Instructor Comment** text field
+- **Class + Level required fields** on every save (auto-populated from student's active enrollment)
+- Session-based history: each save creates a new snapshot — click any session to view it in read-only mode
+- **Delete session** with inline confirm bar (trash button per session card)
+- Level badges in session history cards (avg level across all domains)
+- **New DB storage model** ✅: each save INSERTs one row per domain per session, using `(student_id, skill_key, assessed_at)` as the unique key. The `notes` column is a flat JSON object `{level, comment, course_id, course_name, level_id, level_name}`. This allows the third-party app to correctly group sessions by `assessed_at`.
+- Backward-compatible with legacy data (old `notes` JSON-array format auto-detected and rendered correctly)
+
+### Class Report ⭐ NEW
+- Accessible via **Class Report** in the sidebar navigation
+- **Student repartition per course → level** in a structured, printable table
+- Columns per student: Name, Status, Start Date, End Date, Attendance Count, Assessment Link, Notes
+- **Attendance count** is scoped to the enrollment period: `start_date` → `end_date` (or today if no end date) — counts `present` + `late` records only
+- **Assessment link button** — click to navigate directly to Student Progress for that student
+- Students sorted: active first, then alphabetically
+- **Course-level grouping** with summary counts (active, completed, total enrolled)
+- **Global summary footer** with totals across all courses/levels
+- **Filter by course** and/or **filter by level** with instant re-render
+- **Print / Save PDF** button — triggers `window.print()` with dedicated `@media print` CSS (A4 landscape, hides UI chrome, forces table borders)
 
 ### Settings
 - Center branding (name, logo, color)
@@ -207,9 +228,32 @@ Email uses **EmailJS** with Gmail SMTP via an App Password (no OAuth, no domain 
 
 ---
 
-## 🗃️ Required SQL Migration — Run in Supabase
+## 🗃️ Required SQL Migrations — Run in Supabase
 
-Run this once in **Supabase → SQL Editor** to create the `trainer_sessions` table:
+### M15 — `trainers.is_published` column ⚠️ RUN IN SUPABASE
+
+```sql
+ALTER TABLE trainers
+  ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false;
+```
+
+### M16 — `enrollments` date & notes columns ⚠️ RUN IN SUPABASE
+
+```sql
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS start_date DATE;
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS end_date   DATE;
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS notes      TEXT;
+```
+
+### M13 — `enrollments.level_progress` column ⚠️ PENDING (run once)
+
+```sql
+ALTER TABLE enrollments
+  ADD COLUMN IF NOT EXISTS level_progress INT DEFAULT 0
+  CHECK (level_progress BETWEEN 0 AND 100);
+```
+
+### Trainer sessions table (run once if not already done)
 
 ```sql
 -- Trainer Sessions table (attendance log per trainer per level)
@@ -280,6 +324,7 @@ js/pages/
   financials.js         Financials module
   notifications.js      Notifications module
   progress.js           Student Progress module
+  class_report.js       Class Report module ⭐ NEW
   settings.js           Settings module
 
 supabase/
