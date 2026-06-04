@@ -410,7 +410,28 @@ const CoursesPage = {
     const enrolledIds = new Set((enrollments || []).map(e => e.student_id));
     const availableStudents = (allStudents || []).filter(s => !enrolledIds.has(s.id) && s.status === 'active');
 
-    panel.innerHTML = this.enrollmentPanelHTML(levelId, enrollments || [], availableStudents, levelSlots || []);
+    // ── Load assessments to know which students have been assessed FOR THIS LEVEL ──
+    const assessedStudentIds = new Set();
+    if ((enrollments || []).length > 0) {
+      const studentIds = (enrollments || []).map(e => e.student_id).filter(Boolean);
+      const { data: assessRows } = await DB.getAll('assessments', {
+        select: 'student_id, notes',
+        in: { student_id: studentIds },
+      });
+      (assessRows || []).forEach(row => {
+        let n = row.notes;
+        if (typeof n === 'string') { try { n = JSON.parse(n); } catch(e2) { n = {}; } }
+        const nObj = n || {};
+        // Match by level_id (new model) OR level_name (legacy)
+        const level = (enrollments || []).find(en => en.student_id === row.student_id);
+        const levelName = level?.student ? undefined : undefined; // resolved below via levelId
+        if (nObj.level_id === levelId) {
+          assessedStudentIds.add(row.student_id);
+        }
+      });
+    }
+
+    panel.innerHTML = this.enrollmentPanelHTML(levelId, enrollments || [], availableStudents, levelSlots || [], assessedStudentIds);
 
     // Update the count badge on the level card header without re-rendering everything
     this._refreshLevelBadge(levelId, enrollments || []);
@@ -447,19 +468,28 @@ const CoursesPage = {
     oldBadge.replaceWith(newBadge);
   },
 
-  enrollmentPanelHTML(levelId, enrollments, availableStudents, levelSlots = []) {
+  enrollmentPanelHTML(levelId, enrollments, availableStudents, levelSlots = [], assessedStudentIds = new Set()) {
     return `
       <div>
         <!-- Header row -->
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
           <div style="font-weight:600;font-size:var(--font-size-sm)">
             <i class="fas fa-users" style="color:var(--brand-primary)"></i>
             Enrolled Students
             <span class="badge badge-blue" style="margin-left:6px">${enrollments.length}</span>
           </div>
-          <button class="btn btn-primary btn-sm" onclick="CoursesPage.openEnrollModal('${levelId}')">
-            <i class="fas fa-user-plus"></i> Enroll Student
-          </button>
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            ${enrollments.length > 0 ? `
+              <button class="btn btn-sm btn-secondary"
+                onclick="CoursesPage.resetAllProgress('${levelId}')"
+                title="Set all enrolled students to 50%"
+                style="font-size:11px">
+                <i class="fas fa-redo-alt" style="margin-right:4px"></i>Reset all to 50%
+              </button>` : ''}
+            <button class="btn btn-primary btn-sm" onclick="CoursesPage.openEnrollModal('${levelId}')">
+              <i class="fas fa-user-plus"></i> Enroll Student
+            </button>
+          </div>
         </div>
 
         <!-- Enrolled students table -->
@@ -476,29 +506,86 @@ const CoursesPage = {
                  <thead>
                    <tr>
                      <th>Student</th>
+                     <th>Progress</th>
                      <th>Schedule Slot</th>
-                     <th>Enrolled</th>
+                     <th>Start Date</th>
+                     <th>End Date</th>
+                     <th>Notes</th>
                      <th>Status</th>
                      <th style="text-align:right">Actions</th>
                    </tr>
                  </thead>
                  <tbody>
                    ${enrollments.map(e => {
-                     const s = e.student || {};
+                     const s    = e.student || {};
                      const color = s.avatar_color || Utils.avatarColor(s.full_name);
+                     const prog  = e.level_progress ?? 0;
+                     const progColor = prog >= 80 ? 'var(--brand-primary)' : prog >= 40 ? '#f97316' : '#ef4444';
+                     const hasAssessment = assessedStudentIds.has(e.student_id);
                      const slotOpts = levelSlots.map(sl => {
                        const key = this._slotKey(sl);
                        const lbl = sl.label ? `${sl.label} (${key})` : key;
                        return `<option value="${Utils.esc(key)}" ${e.schedule_slot===key?'selected':''}>${Utils.esc(lbl)}</option>`;
                      }).join('');
                      return `
-                       <tr>
+                       <tr id="enroll-row-${e.id}">
                          <td>
                            <div style="display:flex;align-items:center;gap:8px">
                              <div class="users-table-avatar" style="background:${color};width:30px;height:30px;font-size:11px;flex-shrink:0">${Utils.initials(s.full_name || '?')}</div>
                              <div>
                                <div style="font-weight:600;font-size:var(--font-size-sm)">${Utils.esc(s.full_name || 'Unknown')}</div>
                                ${s.phone ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(s.phone)}</div>` : ''}
+                             </div>
+                           </div>
+                         </td>
+                         <td style="min-width:170px">
+                           <div style="display:flex;align-items:center;gap:6px">
+                             <div style="flex:1">
+                               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+                                 <span id="prog-lbl-${e.id}"
+                                   style="font-size:11px;font-weight:700;color:${progColor}">
+                                   ${prog}%
+                                 </span>
+                               </div>
+                               <div style="height:6px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden">
+                                 <div id="prog-bar-${e.id}"
+                                   style="height:100%;width:${prog}%;background:${progColor};
+                                          border-radius:4px;transition:width .3s ease">
+                                 </div>
+                               </div>
+                             </div>
+                             <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+                               <button class="btn-prog-step" title="Decrease by step"
+                                 onclick="CoursesPage.stepProgress('${e.id}', -1, '${levelId}')">
+                                 <i class="fas fa-minus"></i>
+                               </button>
+                               <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+                                 <input type="number" min="0" max="100"
+                                   id="prog-val-${e.id}"
+                                   value="${prog}"
+                                   data-current="${prog}"
+                                   style="width:46px;padding:2px 4px;font-size:11px;font-weight:700;
+                                          text-align:center;border:1px solid var(--border-color);
+                                          border-radius:var(--radius-sm);background:var(--bg-card);
+                                          color:var(--text-primary)"
+                                   title="Current value — edit &amp; Enter to save, or use +/− buttons"
+                                   onkeydown="if(event.key==='Enter'){CoursesPage.saveProgress('${e.id}', this.value, '${levelId}');this.blur();}" />
+                                 <div style="display:flex;align-items:center;gap:3px">
+                                   <span style="font-size:9px;color:var(--text-muted)">step</span>
+                                   <input type="number" min="1" max="100"
+                                     id="prog-step-${e.id}"
+                                     value="5"
+                                     style="width:34px;padding:1px 3px;font-size:10px;
+                                            text-align:center;border:1px solid var(--border-color);
+                                            border-radius:var(--radius-sm);background:var(--bg-tertiary);
+                                            color:var(--text-secondary)"
+                                     title="Step size for + / − buttons" />
+                                 </div>
+                               </div>
+                               <button class="btn-prog-step" title="Increase by step"
+                                 onclick="CoursesPage.stepProgress('${e.id}', +1, '${levelId}')">
+                                 <i class="fas fa-plus"></i>
+                               </button>
                              </div>
                            </div>
                          </td>
@@ -512,7 +599,33 @@ const CoursesPage = {
                              : `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">No slots defined</span>`
                            }
                          </td>
-                         <td style="font-size:var(--font-size-xs);color:var(--text-muted)">${e.enrolled_at ? Utils.fmtDate(e.enrolled_at) : '—'}</td>
+                         <!-- Start Date -->
+                         <td style="min-width:120px">
+                           <input type="date"
+                             value="${e.start_date ? e.start_date.slice(0,10) : (e.enrolled_at ? e.enrolled_at.slice(0,10) : '')}"
+                             style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);
+                                    border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
+                             onchange="CoursesPage.saveEnrollDate('${e.id}', 'start', this.value, '${levelId}')" />
+                         </td>
+                         <!-- End Date -->
+                         <td style="min-width:120px">
+                           <input type="date"
+                             value="${e.end_date ? e.end_date.slice(0,10) : ''}"
+                             style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);
+                                    border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
+                             onchange="CoursesPage.saveEnrollDate('${e.id}', 'end', this.value, '${levelId}')" />
+                         </td>
+                         <!-- Notes -->
+                         <td style="min-width:140px">
+                           <input type="text"
+                             value="${Utils.esc(e.notes || '')}"
+                             placeholder="Notes…"
+                             style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);
+                                    border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
+                             onblur="CoursesPage.saveEnrollNotes('${e.id}', this.value, '${levelId}')"
+                             onkeydown="if(event.key==='Enter'){this.blur()}" />
+                         </td>
+                         <!-- Status -->
                          <td>
                            <select class="form-select" style="padding:3px 8px;font-size:var(--font-size-xs);width:110px"
                              onchange="CoursesPage.changeEnrollStatus('${e.id}', this.value, '${levelId}')">
@@ -521,7 +634,17 @@ const CoursesPage = {
                              ).join('')}
                            </select>
                          </td>
-                         <td style="text-align:right">
+                         <!-- Actions -->
+                         <td style="text-align:right;white-space:nowrap">
+                           <button class="btn btn-icon btn-sm"
+                             title="${hasAssessment ? '✅ Assessment done for this level — click to view/add' : 'No assessment yet — click to assess'}"
+                             style="${hasAssessment
+                               ? 'background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.35)'
+                               : 'background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-color)'}"
+                             onclick="CoursesPage.goToAssessment('${s.id}', '${levelId}')">
+                             <i class="fas fa-chart-bar"></i>
+                             ${hasAssessment ? '<i class="fas fa-check" style="font-size:8px;margin-left:2px;color:#22c55e"></i>' : ''}
+                           </button>
                            <button class="btn btn-danger btn-icon btn-sm" title="Remove from level"
                              onclick="CoursesPage.removeEnrollment('${e.id}', '${Utils.esc(s.full_name || 'this student')}', '${levelId}')">
                              <i class="fas fa-user-minus"></i>
@@ -600,15 +723,46 @@ const CoursesPage = {
 
     el.innerHTML = `
       <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-bottom:1rem">
-        Select a student and a schedule slot, then click their name to enroll.
+        Select a student, set the start date, then click their name to enroll.
       </p>
+
+      <!-- Dates row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:4px">
+        <div class="form-group" style="margin:0">
+          <label class="form-label">
+            <i class="fas fa-calendar-plus" style="color:var(--brand-primary);margin-right:4px"></i>
+            Start Date <span style="color:var(--brand-danger)">*</span>
+          </label>
+          <input type="date" id="enroll-start-date" class="form-input"
+            value="${Utils.localDateISO()}" required />
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">
+            <i class="fas fa-calendar-check" style="color:var(--text-muted);margin-right:4px"></i>
+            End Date <span style="font-size:10px;color:var(--text-muted);font-weight:400">(optional)</span>
+          </label>
+          <input type="date" id="enroll-end-date" class="form-input" />
+        </div>
+      </div>
+
       ${slotSelectHTML}
+
+      <!-- Notes -->
       <div class="form-group" style="margin-top:10px">
-        <label class="form-label">Search</label>
+        <label class="form-label">
+          <i class="fas fa-sticky-note" style="color:var(--text-muted);margin-right:4px"></i>
+          Notes <span style="font-size:10px;color:var(--text-muted);font-weight:400">(optional)</span>
+        </label>
+        <textarea id="enroll-notes" class="form-textarea" rows="2"
+          placeholder="Any remarks about this enrollment…" style="font-size:12px"></textarea>
+      </div>
+
+      <div class="form-group" style="margin-top:10px">
+        <label class="form-label">Search Student</label>
         <input type="text" id="enroll-search" class="form-input" placeholder="Type a name…"
           oninput="CoursesPage._filterEnrollList(this.value)" />
       </div>
-      <div id="enroll-student-list" style="max-height:300px;overflow-y:auto;border:1px solid var(--border-color);border-radius:var(--radius-md)">
+      <div id="enroll-student-list" style="max-height:260px;overflow-y:auto;border:1px solid var(--border-color);border-radius:var(--radius-md)">
         ${available.map(s => `
           <div class="enroll-student-row" data-name="${Utils.esc(s.full_name?.toLowerCase() || '')}"
             style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border-color);cursor:pointer;transition:background .15s"
@@ -639,14 +793,19 @@ const CoursesPage = {
   },
 
   async confirmEnroll(studentId, studentName, levelId) {
-    const slot = document.getElementById('enroll-slot-select')?.value || null;
-    const { error } = await DB.enrollStudent(studentId, levelId, 'active', slot);
+    const slot      = document.getElementById('enroll-slot-select')?.value  || null;
+    const startDate = document.getElementById('enroll-start-date')?.value   || Utils.localDateISO();
+    const endDate   = document.getElementById('enroll-end-date')?.value     || null;
+    const notes     = document.getElementById('enroll-notes')?.value?.trim() || null;
+
+    if (!startDate) return Toast.warning('Please set a Start Date before enrolling.');
+
+    const { error } = await DB.enrollStudent(studentId, levelId, 'active', slot, startDate, endDate, notes);
     if (error) {
       Toast.error(error.message || 'Failed to enroll student');
       return;
     }
-    const slotMsg = slot ? ` (${slot})` : '';
-    Toast.success(`${studentName} enrolled successfully!${slotMsg}`);
+    Toast.success(`${studentName} enrolled successfully! (Start: ${startDate})`);
     Modal.close();
     await this.loadEnrollmentPanel(levelId);
   },
@@ -655,6 +814,100 @@ const CoursesPage = {
     const { error } = await DB.setEnrollmentSlot(enrollmentId, slot);
     if (error) { Toast.error('Failed to update slot'); return; }
     Toast.success('Schedule slot updated');
+    await this.loadEnrollmentPanel(levelId);
+  },
+
+  async saveEnrollDate(enrollmentId, type, value, levelId) {
+    const patch = type === 'start'
+      ? { start_date: value || null }
+      : { end_date:   value || null };
+    const { error } = await DB.updateEnrollment(enrollmentId, patch);
+    if (error) { Toast.error('Failed to save date'); return; }
+    Toast.success(type === 'start' ? 'Start date saved' : 'End date saved');
+    // update badge (status might need refresh) but don't reload full panel
+  },
+
+  async saveEnrollNotes(enrollmentId, value, levelId) {
+    const { error } = await DB.updateEnrollment(enrollmentId, { notes: value || null });
+    if (error) { Toast.error('Failed to save notes'); }
+    // silent save — no toast to avoid spamming on blur
+  },
+
+  // Navigate to Progress page pre-selecting this student
+  goToAssessment(studentId, levelId) {
+    // Switch to Progress page and auto-select the student
+    if (typeof App !== 'undefined') {
+      App.navigate('progress');
+      // Give the page a moment to render, then trigger student selection
+      setTimeout(() => {
+        if (typeof ProgressPage !== 'undefined') {
+          ProgressPage.selectStudent(studentId);
+        }
+      }, 400);
+    }
+  },
+
+  // ── LEVEL PROGRESS ────────────────────────────────────────────
+
+  // direction: +1 or -1 — step size read from the dedicated step input
+  stepProgress(enrollmentId, direction, levelId) {
+    const valInp  = document.getElementById(`prog-val-${enrollmentId}`);
+    const stepInp = document.getElementById(`prog-step-${enrollmentId}`);
+    if (!valInp) return;
+
+    const step    = Math.min(100, Math.max(1, parseInt(stepInp?.value) || 5));
+    const current = Math.min(100, Math.max(0, parseInt(valInp.value) || 0));
+    const newVal  = Math.min(100, Math.max(0, current + direction * step));
+
+    valInp.value = newVal;
+    this.saveProgress(enrollmentId, newVal, levelId);
+  },
+
+  async saveProgress(enrollmentId, value, levelId) {
+    const newProg   = Math.min(100, Math.max(0, parseInt(value) || 0));
+    const progColor = newProg >= 80 ? 'var(--brand-primary)' : newProg >= 40 ? '#f97316' : '#ef4444';
+
+    // Optimistic UI
+    const lbl = document.getElementById(`prog-lbl-${enrollmentId}`);
+    const bar = document.getElementById(`prog-bar-${enrollmentId}`);
+    const inp = document.getElementById(`prog-val-${enrollmentId}`);
+    if (lbl) { lbl.textContent = newProg + '%'; lbl.style.color = progColor; }
+    if (bar) { bar.style.width = newProg + '%'; bar.style.background = progColor; }
+    if (inp) inp.value = newProg;
+
+    const { error } = await DB.setEnrollmentProgress(enrollmentId, newProg);
+    if (error) { Toast.error('Failed to save progress'); return; }
+
+    if (lbl) {
+      lbl.innerHTML = `${newProg}% <i class="fas fa-check" style="font-size:9px;margin-left:2px;color:var(--brand-primary)"></i>`;
+      setTimeout(() => { if (lbl) lbl.textContent = newProg + '%'; }, 1500);
+    }
+  },
+
+  // Reset every enrolled student in this level to 50%
+  async resetAllProgress(levelId) {
+    const panel = document.getElementById(`enrollment-panel-${levelId}`);
+    if (!panel) return;
+
+    // Collect all enrollment IDs visible in this panel
+    const rows = panel.querySelectorAll('[id^="enroll-row-"]');
+    if (!rows.length) return;
+
+    const ids = Array.from(rows).map(r => r.id.replace('enroll-row-', ''));
+
+    if (!confirm(`Reset progress to 50% for all ${ids.length} student(s) in this level?`)) return;
+
+    // Bulk update — fire all in parallel
+    const results = await Promise.all(ids.map(id => DB.setEnrollmentProgress(id, 50)));
+    const failed  = results.filter(r => r.error).length;
+
+    if (failed > 0) {
+      Toast.error(`${failed} update(s) failed. Please retry.`);
+    } else {
+      Toast.success(`Progress reset to 50% for ${ids.length} student(s).`);
+    }
+
+    // Refresh the panel to reflect new values
     await this.loadEnrollmentPanel(levelId);
   },
 
