@@ -217,7 +217,7 @@ const DB = {
     });
   },
 
-  /** Get all active enrollments for a specific level */
+  /** Get all enrollments for a specific level (includes new date/notes fields) */
   async getLevelEnrollments(levelId) {
     return this.getAll('enrollments', {
       select: '*, student:student_id(id, full_name, birthday, avatar_color, phone, status)',
@@ -273,16 +273,34 @@ const DB = {
   },
 
   /** Enroll a student in a level (safe — ignores duplicate) */
-  async enrollStudent(studentId, levelId, status = 'active', scheduleSlot = null) {
+  async enrollStudent(studentId, levelId, status = 'active', scheduleSlot = null, startDate = null, endDate = null, notes = null) {
     if (!_supabase) return { data: null, error: new Error('Not initialized') };
-    const row = { student_id: studentId, level_id: levelId, status, enrolled_at: Utils.localDateISO() };
+    const today = Utils.localDateISO();
+    const row = {
+      student_id:   studentId,
+      level_id:     levelId,
+      status,
+      enrolled_at:  today,
+      start_date:   startDate || today,   // always set — defaults to today
+    };
     if (scheduleSlot) row.schedule_slot = scheduleSlot;
+    if (endDate)      row.end_date      = endDate;
+    if (notes)        row.notes         = notes;
     const { data, error } = await _supabase
       .from('enrollments')
       .upsert(row, { onConflict: 'student_id,level_id' })
       .select()
       .single();
     return { data, error };
+  },
+
+  /** Update enrollment dates and notes */
+  async setEnrollmentDates(enrollmentId, startDate, endDate, notes) {
+    const patch = {};
+    if (startDate !== undefined) patch.start_date = startDate || null;
+    if (endDate   !== undefined) patch.end_date   = endDate   || null;
+    if (notes     !== undefined) patch.notes      = notes     || null;
+    return this.update('enrollments', enrollmentId, patch);
   },
 
   /** Remove a student from a level */
@@ -293,6 +311,12 @@ const DB = {
   /** Update enrollment status (active / inactive / completed / dropped) */
   async setEnrollmentStatus(enrollmentId, status) {
     return this.update('enrollments', enrollmentId, { status });
+  },
+
+  /** Update level_progress (0–100) for an enrollment */
+  async setEnrollmentProgress(enrollmentId, progress) {
+    const val = Math.min(100, Math.max(0, parseInt(progress) || 0));
+    return this.update('enrollments', enrollmentId, { level_progress: val });
   },
 
   async createEnrollment(data) { return this.insert('enrollments', data); },
@@ -554,14 +578,14 @@ const DB = {
   // ─────────────────────────────────────────────
   // ASSESSMENTS
   // ─────────────────────────────────────────────
-  // DESIGN NOTE — no schema migration required:
-  //   The DB keeps exactly ONE row per (student_id, skill_key).
-  //   The `notes` column stores a JSON array of historical snapshots:
-  //     [ { score, assessed_at, session_notes }, ... ]   (newest first)
-  //   The top-level `score` and `assessed_at` always reflect the latest entry.
-  //   The client reconstructs full session history from these arrays.
+  // DESIGN NOTE — one row per (student_id, skill_key, assessed_at).
+  //   Each session = 5 rows sharing the exact same assessed_at timestamp.
+  //   The `notes` column stores a JSON object with session metadata:
+  //     { level, comment, course_id, course_name, level_id, level_name }
+  //   This model is fully compatible with third-party apps that group
+  //   rows by assessed_at to reconstruct sessions.
 
-  // Fetch all skill rows for a student (each contains full notes-history)
+  // Fetch all domain rows for a student, newest first
   async getAssessments(studentId) {
     return this.getAll('assessments', {
       filter: { student_id: studentId },
@@ -571,44 +595,67 @@ const DB = {
   },
 
   // Save a complete assessment session.
-  // `skillRows`  – array of { student_id, skill_key, skill_label, category, score, assessed_at, session_notes }
-  // `existingRows` – current DB rows for this student (already fetched by caller)
-  // Strategy: for each skill, append a new history entry to the notes JSON array, then upsert.
-  async saveAssessmentSession(skillRows, existingRows = []) {
+  // Each skill becomes ONE new INSERT row (student_id + skill_key + assessed_at).
+  // The unique constraint is (student_id, skill_key, assessed_at) so re-saving
+  // the exact same second is safe (upsert). In practice timestamps differ per session.
+  async saveAssessmentSession(skillRows) {
     if (!_supabase) return { data: null, error: new Error('Not initialized') };
 
-    const existingMap = {};
-    (existingRows || []).forEach(r => { existingMap[r.skill_key] = r; });
-
-    const upsertPayload = skillRows.map(row => {
-      const existing   = existingMap[row.skill_key];
-      // Parse existing history or start fresh
-      let history = [];
-      if (existing?.notes) {
-        try { history = JSON.parse(existing.notes); } catch { history = []; }
-        if (!Array.isArray(history)) history = [];
+    const insertPayload = skillRows.map(row => {
+      // Copy ALL fields from session_notes into the notes column.
+      // No field-gating — SpeedMath rows have no 'level', Robotics rows have no 'speedmath_score',
+      // both need course_id / course_name / level_id / level_name preserved.
+      let notesObj = {};
+      if (row.session_notes) {
+        try {
+          const parsed = JSON.parse(row.session_notes);
+          if (parsed && typeof parsed === 'object') {
+            notesObj = parsed;   // store everything as-is
+          }
+        } catch { /* ignore malformed JSON */ }
       }
-      // Prepend new snapshot (newest first)
-      history.unshift({
-        score:         row.score,
-        assessed_at:   row.assessed_at,
-        session_notes: row.session_notes || null,
-      });
 
       return {
         student_id:  row.student_id,
         skill_key:   row.skill_key,
         skill_label: row.skill_label || row.skill_key,
-        category:    row.category    || 'general',
-        score:       row.score,          // latest score
-        assessed_at: row.assessed_at,    // latest timestamp
-        notes:       JSON.stringify(history),
+        category:    row.category    || 'domain',
+        score:       row.score,
+        assessed_at: row.assessed_at,
+        notes:       JSON.stringify(notesObj),
       };
     });
 
     const { data, error } = await _supabase
       .from('assessments')
-      .upsert(upsertPayload, { onConflict: 'student_id,skill_key' })
+      .insert(insertPayload)
+      .select();
+    return { data, error };
+  },
+
+  // Delete all rows for a given student + session timestamp (second-precision)
+  async deleteAssessmentSession(studentId, sessionId) {
+    if (!_supabase) return { error: null };
+    // sessionId = assessed_at.slice(0,19)  e.g. "2026-06-01T10:30:45"
+    // We delete all rows where assessed_at starts with that second prefix.
+    // Append 'Z' only if not already present (ISO strings from JS already end in Z).
+    const prefix = sessionId.endsWith('Z') ? sessionId.slice(0, 19) : sessionId;
+    const { error } = await _supabase
+      .from('assessments')
+      .delete()
+      .eq('student_id', studentId)
+      .gte('assessed_at', prefix + '.000Z')
+      .lte('assessed_at', prefix + '.999Z');
+    return { error };
+  },
+
+  // Bulk insert assessment rows (legacy — kept for compatibility)
+  // Uses INSERT (not upsert) to avoid dependency on a specific unique constraint.
+  async upsertAssessmentRows(rows) {
+    if (!_supabase) return { data: null, error: new Error('Not initialized') };
+    const { data, error } = await _supabase
+      .from('assessments')
+      .insert(rows)
       .select();
     return { data, error };
   },
