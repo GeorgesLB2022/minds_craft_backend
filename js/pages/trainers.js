@@ -182,6 +182,17 @@ const TrainersPage = {
           </div>
           <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0">
             ${Utils.statusBadge(t.status)}
+            ${t.is_published
+              ? `<span style="display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:700;
+                   background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.3);
+                   border-radius:99px;padding:2px 8px">
+                   <i class="fas fa-globe" style="font-size:.6rem"></i> Published
+                 </span>`
+              : `<span style="display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:700;
+                   background:var(--bg-card2);color:var(--text-muted);border:1px solid var(--border);
+                   border-radius:99px;padding:2px 8px">
+                   <i class="fas fa-eye-slash" style="font-size:.6rem"></i> Not published
+                 </span>`}
             ${this._starsHTML(t.rating)}
             ${t.priority != null
               ? `<span title="Display priority" style="font-size:.68rem;font-weight:700;
@@ -405,6 +416,41 @@ const TrainersPage = {
             placeholder="Brief bio, specialties, background…">${Utils.esc(t?.description || '')}</textarea>
         </div>
 
+        <!-- ── Published toggle ── -->
+        <div class="form-group">
+          <label class="form-label" style="display:flex;align-items:center;gap:8px">
+            <i class="fas fa-globe" style="color:var(--brand-primary)"></i>
+            Published
+            <span style="font-size:.72rem;color:var(--text-muted);font-weight:400">
+              — visible in the parent portal &amp; public-facing apps
+            </span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:10px;cursor:pointer;user-select:none">
+            <div style="position:relative;width:44px;height:24px">
+              <input type="checkbox" name="is_published" id="trainer-published-chk"
+                ${t?.is_published ? 'checked' : ''}
+                style="opacity:0;width:0;height:0;position:absolute"
+                onchange="TrainersPage._onPublishedChange(this.checked)" />
+              <div id="trainer-published-track"
+                style="position:absolute;inset:0;border-radius:12px;transition:background .2s;
+                       background:${t?.is_published ? 'var(--brand-primary)' : 'var(--border)'}">
+              </div>
+              <div id="trainer-published-thumb"
+                style="position:absolute;top:3px;width:18px;height:18px;border-radius:50%;
+                       background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .2s;
+                       left:${t?.is_published ? '23px' : '3px'}">
+              </div>
+            </div>
+            <span id="trainer-published-label" style="font-size:.85rem;font-weight:600;
+              color:${t?.is_published ? 'var(--brand-primary)' : 'var(--text-muted)'}">
+              ${t?.is_published ? '✅ Published' : '⬜ Not published'}
+            </span>
+          </label>
+          <p style="font-size:.72rem;color:var(--text-muted);margin-top:4px">
+            When enabled, this trainer appears publicly. Disable to hide without deleting.
+          </p>
+        </div>
+
         <div class="modal-footer" style="padding:0;border:none;margin-top:1rem">
           <button type="button" class="btn btn-secondary" onclick="Modal.close()">Cancel</button>
           <button type="submit" class="btn btn-primary">
@@ -481,6 +527,18 @@ const TrainersPage = {
     }
   },
 
+  _onPublishedChange(checked) {
+    const track = document.getElementById('trainer-published-track');
+    const thumb = document.getElementById('trainer-published-thumb');
+    const label = document.getElementById('trainer-published-label');
+    if (track) track.style.background = checked ? 'var(--brand-primary)' : 'var(--border)';
+    if (thumb) thumb.style.left = checked ? '23px' : '3px';
+    if (label) {
+      label.textContent = checked ? '✅ Published' : '⬜ Not published';
+      label.style.color = checked ? 'var(--brand-primary)' : 'var(--text-muted)';
+    }
+  },
+
   _onStarClick(n) {
     // Full click = set to that star (or toggle off if already exactly that value)
     const range = document.getElementById('trainer-rating-range');
@@ -508,7 +566,8 @@ const TrainersPage = {
       description: fd.get('description') || null,
       rating:      fd.get('rating')      ? parseFloat(fd.get('rating')) : null,
       avatar_url:  fd.get('avatar_url')  || null,
-      priority:    priorityRaw !== '' && priorityRaw !== null ? parseInt(priorityRaw) : null,
+      priority:     priorityRaw !== '' && priorityRaw !== null ? parseInt(priorityRaw) : null,
+      is_published: fd.get('is_published') === 'on',
     };
 
     // Don't store empty string for avatar_url
