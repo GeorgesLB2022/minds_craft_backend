@@ -745,5 +745,36 @@ CREATE POLICY "Parent can mark own notifications read"
   USING  (auth.uid() = parent_user_id)
   WITH CHECK (auth.uid() = parent_user_id AND is_read = true);
 
+-- M13: level_progress on enrollments
+-- Tracks per-student progress percentage (0–100) within a level.
+-- Set by instructors from the Courses page → Enrolled Students panel.
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS level_progress INT DEFAULT 0
+  CHECK (level_progress BETWEEN 0 AND 100);
+
+-- ============================================================
+-- M14: Widen assessments.score to support SpeedMath (0–120)
+-- The original CHECK (score BETWEEN 0 AND 5) was designed for star ratings.
+-- SpeedMath sessions store a raw score up to 120 in this column.
+-- We drop the old constraint and replace it with a wider one (0–120).
+-- Robotics & STEM sessions continue to use values 1–4 (level order).
+-- ============================================================
+ALTER TABLE assessments DROP CONSTRAINT IF EXISTS assessments_score_check;
+ALTER TABLE assessments DROP CONSTRAINT IF EXISTS assessments_score_c;
+ALTER TABLE assessments
+  ADD CONSTRAINT assessments_score_check CHECK (score BETWEEN 0 AND 120);
+
+-- M16: Add start_date, end_date, notes to enrollments
+-- start_date : when the student actually started this level (defaults to enrolled_at date)
+-- end_date   : when the student completed / left this level (null = still active)
+-- notes      : free text notes per enrollment row (instructor remarks, etc.)
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS start_date  DATE;
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS end_date    DATE;
+ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS notes       TEXT;
+
+-- M15: Add is_published to trainers
+-- Controls visibility in the parent portal and public-facing apps.
+-- Default = false so existing trainers are NOT published until explicitly set.
+ALTER TABLE trainers ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false;
+
 -- End of migration script
 -- ============================================================
