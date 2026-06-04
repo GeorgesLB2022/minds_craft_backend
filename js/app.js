@@ -16,8 +16,9 @@ const App = {
     events:    { title: 'Events', render: () => EventsPage.render() },
     financials:{ title: 'Financials', render: () => FinancialsPage.render() },
     notifications: { title: 'Notifications', render: () => NotificationsPage.render() },
-    progress:  { title: 'Student Progress', render: () => ProgressPage.render() },
-    settings:  { title: 'Settings', render: () => SettingsPage.render() },
+    progress:     { title: 'Student Progress', render: () => ProgressPage.render() },
+    class_report: { title: 'Class Report',     render: () => ClassReportPage.render() },
+    settings:     { title: 'Settings',         render: () => SettingsPage.render() },
   },
 
   // ─────────────────────────────────────────────
