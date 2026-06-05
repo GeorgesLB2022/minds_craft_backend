@@ -416,9 +416,57 @@ CREATE POLICY "authenticated_full_access" ON public.users
 
 ---
 
+## 📦 M17 Migration — `level_completions` Table
+
+**Must be run once in Supabase → SQL Editor before using the "Done" button:**
+
+```sql
+CREATE TABLE IF NOT EXISTS level_completions (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  student_id      UUID NOT NULL REFERENCES users(id)   ON DELETE CASCADE,
+  level_id        UUID NOT NULL REFERENCES levels(id)  ON DELETE CASCADE,
+  course_id       UUID REFERENCES courses(id)          ON DELETE SET NULL,
+  enrollment_id   UUID,  -- soft-link, no FK — survives enrollment deletion
+  start_date      DATE,
+  end_date        DATE,
+  attendance_count INT DEFAULT 0,
+  schedule_slot   TEXT,
+  notes           TEXT,
+  completed_at    TIMESTAMPTZ DEFAULT NOW(),
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+ALTER TABLE level_completions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can do everything" ON level_completions
+  FOR ALL USING (auth.role() = 'authenticated');
+CREATE INDEX IF NOT EXISTS idx_level_completions_student ON level_completions(student_id);
+CREATE INDEX IF NOT EXISTS idx_level_completions_level   ON level_completions(level_id);
+CREATE INDEX IF NOT EXISTS idx_level_completions_course  ON level_completions(course_id);
+```
+
+**Design rationale:**  
+`UNIQUE(student_id, level_id)` on `enrollments` means only one row per student per level.
+If a student is removed from a level and later re-enrolled, their previous history would be lost.  
+`level_completions` solves this by being an **immutable archive** — no FK to `enrollments`,
+so history always survives, even after multiple re-enrollment cycles.
+
+### Completion Flow (v20260604c)
+
+| Step | What happens |
+|---|---|
+| Admin clicks **Done** on a student row | `markCompleted()` modal opens with attendance count pre-filled |
+| Admin confirms | `_confirmMarkCompleted()` writes a snapshot to `level_completions` |
+| Enrollment row is deleted | Student can be freely re-enrolled in the same level |
+| **Completed tab** (per level) | Reads from `level_completions` for that level |
+| **Completed Students page** | Reads all `level_completions` across all levels/courses |
+| **Revert to Active** | Deletes the `level_completions` row + re-enrolls as active |
+
+---
+
 ## 🔜 Potential Next Steps
 
 - [x] Parent-facing portal — ✅ Done (`parent_portal.html`)
+- [x] Separate completion archive (`level_completions` M17) — ✅ Done
 - [ ] Fix financial-package logic: multi-month packages recorded as lump-sum at renewal dates
 - [ ] Allocation edits create new DB rows to preserve full history
 - [ ] Student-level transaction/allocation log visible in Student Allocations Tab for a specific period
