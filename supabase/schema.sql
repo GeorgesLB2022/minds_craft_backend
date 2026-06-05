@@ -776,5 +776,44 @@ ALTER TABLE enrollments ADD COLUMN IF NOT EXISTS notes       TEXT;
 -- Default = false so existing trainers are NOT published until explicitly set.
 ALTER TABLE trainers ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT false;
 
+-- ============================================================
+-- M17: level_completions — permanent archive of completed level records
+-- ============================================================
+-- This table is a PERMANENT SNAPSHOT written when a student is marked as
+-- "Completed" for a level. It is intentionally separate from `enrollments`
+-- so that the completion record survives even if:
+--   • the enrollment row is later deleted (student re-enrolled in same level)
+--   • the student is removed from a level and moved to another
+-- Each row captures the full context at the moment of completion.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS level_completions (
+  id              UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  student_id      UUID NOT NULL REFERENCES users(id)   ON DELETE CASCADE,
+  level_id        UUID NOT NULL REFERENCES levels(id)  ON DELETE CASCADE,
+  course_id       UUID REFERENCES courses(id)          ON DELETE SET NULL,
+  enrollment_id   UUID,                                -- soft-link to enrollments.id (no FK — survives deletion)
+  start_date      DATE,
+  end_date        DATE,
+  attendance_count INT DEFAULT 0,
+  schedule_slot   TEXT,
+  notes           TEXT,
+  completed_at    TIMESTAMPTZ DEFAULT NOW(),           -- when the completion was recorded
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE level_completions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Authenticated users can do everything" ON level_completions
+  FOR ALL USING (auth.role() = 'authenticated');
+
+CREATE INDEX IF NOT EXISTS idx_level_completions_student  ON level_completions(student_id);
+CREATE INDEX IF NOT EXISTS idx_level_completions_level    ON level_completions(level_id);
+CREATE INDEX IF NOT EXISTS idx_level_completions_course   ON level_completions(course_id);
+
+COMMENT ON TABLE level_completions IS
+  'Permanent archive: one row per student per level completion. '
+  'Survives enrollment deletion and re-enrollment. Written by the app when '
+  'an enrollment is marked as completed.';
+
 -- End of migration script
 -- ============================================================
