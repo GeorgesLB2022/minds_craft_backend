@@ -396,10 +396,16 @@ const CoursesPage = {
     if (!panel) return;
     panel.innerHTML = `<div style="text-align:center;padding:1rem;color:var(--text-muted)"><i class="fas fa-spinner fa-spin"></i> Loading students…</div>`;
 
-    const [{ data: enrollments, error: enrErr }, { data: allStudents, error: stuErr }, { data: levelSlots }] = await Promise.all([
+    const [
+      { data: enrollments, error: enrErr },
+      { data: allStudents, error: stuErr },
+      { data: levelSlots },
+      { data: completions },
+    ] = await Promise.all([
       DB.getLevelEnrollments(levelId),
       DB.getStudents(),
       DB.getLevelSchedules(levelId),
+      DB.getLevelCompletions({ filter: { level_id: levelId } }),
     ]);
 
     if (enrErr || stuErr) {
@@ -407,31 +413,46 @@ const CoursesPage = {
       return;
     }
 
+    // Only show active/inactive/dropped enrollments in "In Progress" tab
+    const inProgress = (enrollments || []).filter(e => e.status !== 'completed');
+
     const enrolledIds = new Set((enrollments || []).map(e => e.student_id));
     const availableStudents = (allStudents || []).filter(s => !enrolledIds.has(s.id) && s.status === 'active');
 
-    // ── Load assessments to know which students have been assessed FOR THIS LEVEL ──
+    // ── Load assessments + attendance for in-progress enrollments ──
     const assessedStudentIds = new Set();
-    if ((enrollments || []).length > 0) {
-      const studentIds = (enrollments || []).map(e => e.student_id).filter(Boolean);
-      const { data: assessRows } = await DB.getAll('assessments', {
-        select: 'student_id, notes',
-        in: { student_id: studentIds },
-      });
+    const attCountMap = {};   // enrollmentId → number
+    const today = Utils.localDateISO();
+
+    if (inProgress.length > 0) {
+      const studentIds = inProgress.map(e => e.student_id).filter(Boolean);
+
+      const [{ data: assessRows }, { data: attRows }] = await Promise.all([
+        DB.getAll('assessments', { select: 'student_id, notes', in: { student_id: studentIds } }),
+        DB.getAll('attendance',  { select: 'student_id, date, status', filter: { level_id: levelId } }),
+      ]);
+
+      // Assessment flag per student for this level
       (assessRows || []).forEach(row => {
         let n = row.notes;
         if (typeof n === 'string') { try { n = JSON.parse(n); } catch(e2) { n = {}; } }
-        const nObj = n || {};
-        // Match by level_id (new model) OR level_name (legacy)
-        const level = (enrollments || []).find(en => en.student_id === row.student_id);
-        const levelName = level?.student ? undefined : undefined; // resolved below via levelId
-        if (nObj.level_id === levelId) {
-          assessedStudentIds.add(row.student_id);
-        }
+        if ((n || {}).level_id === levelId) assessedStudentIds.add(row.student_id);
+      });
+
+      // Attendance count per enrollment (scoped to start_date → end_date|today)
+      inProgress.forEach(e => {
+        const start = e.start_date ? e.start_date.slice(0,10) : null;
+        const end   = e.end_date   ? e.end_date.slice(0,10)   : today;
+        attCountMap[e.id] = (attRows || []).filter(r =>
+          r.student_id === e.student_id &&
+          (r.status === 'present' || r.status === 'late') &&
+          (!start || r.date >= start) &&
+          r.date <= end
+        ).length;
       });
     }
 
-    panel.innerHTML = this.enrollmentPanelHTML(levelId, enrollments || [], availableStudents, levelSlots || [], assessedStudentIds);
+    panel.innerHTML = this.enrollmentPanelHTML(levelId, inProgress, completions || [], availableStudents, levelSlots || [], assessedStudentIds, attCountMap);
 
     // Update the count badge on the level card header without re-rendering everything
     this._refreshLevelBadge(levelId, enrollments || []);
@@ -468,21 +489,282 @@ const CoursesPage = {
     oldBadge.replaceWith(newBadge);
   },
 
-  enrollmentPanelHTML(levelId, enrollments, availableStudents, levelSlots = [], assessedStudentIds = new Set()) {
+  // ─────────────────────────────────────────────────────────────────────────
+  // enrollmentPanelHTML  — 2-tab layout
+  //   Tab 1 "In Progress"  — enrollments with status active/inactive/dropped
+  //   Tab 2 "Completed"    — rows from level_completions table
+  // ─────────────────────────────────────────────────────────────────────────
+  enrollmentPanelHTML(levelId, inProgress, completions = [], availableStudents = [], levelSlots = [], assessedStudentIds = new Set(), attCountMap = {}) {
+    const tabId = `ep-tab-${levelId}`;
+
+    // ── Tab 1: In Progress ────────────────────────────────────────────────
+    const inProgressContent = inProgress.length === 0
+      ? `<div style="text-align:center;padding:1.5rem;color:var(--text-muted);background:var(--bg-secondary);border-radius:var(--radius-md)">
+           <i class="fas fa-user-slash" style="font-size:1.5rem;margin-bottom:8px;display:block"></i>
+           <p style="font-size:var(--font-size-sm);margin:0">No students currently in progress for this level.</p>
+           <button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="CoursesPage.openEnrollModal('${levelId}')">
+             <i class="fas fa-plus"></i> Enroll First Student
+           </button>
+         </div>`
+      : `<div style="border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border-color)">
+           <table class="table" style="margin:0">
+             <thead>
+               <tr>
+                 <th>Student</th>
+                 <th>Progress</th>
+                 <th>Schedule Slot</th>
+                 <th>Start Date</th>
+                 <th>End Date</th>
+                 <th style="text-align:center">Att.</th>
+                 <th style="text-align:center">Eval.</th>
+                 <th>Notes</th>
+                 <th>Status</th>
+                 <th style="text-align:right">Actions</th>
+               </tr>
+             </thead>
+             <tbody>
+               ${inProgress.map(e => {
+                 const s    = e.student || {};
+                 const color = s.avatar_color || Utils.avatarColor(s.full_name);
+                 const prog  = e.level_progress ?? 0;
+                 const progColor = prog >= 80 ? 'var(--brand-primary)' : prog >= 40 ? '#f97316' : '#ef4444';
+                 const hasAssessment = assessedStudentIds.has(e.student_id);
+                 const attCount = attCountMap[e.id] ?? 0;
+                 const slotOpts = levelSlots.map(sl => {
+                   const key = this._slotKey(sl);
+                   const lbl = sl.label ? `${sl.label} (${key})` : key;
+                   return `<option value="${Utils.esc(key)}" ${e.schedule_slot===key?'selected':''}>${Utils.esc(lbl)}</option>`;
+                 }).join('');
+                 const statusCfg = {
+                   active:    { bg:'rgba(34,197,94,.13)',  color:'#22c55e', icon:'fa-play-circle'    },
+                   inactive:  { bg:'rgba(148,163,184,.13)',color:'#94a3b8', icon:'fa-pause-circle'   },
+                   completed: { bg:'rgba(59,130,246,.13)', color:'#3b82f6', icon:'fa-flag-checkered' },
+                   dropped:   { bg:'rgba(239,68,68,.13)',  color:'#ef4444', icon:'fa-times-circle'   },
+                 };
+                 const cfg = statusCfg[e.status] || statusCfg.active;
+                 const statusLabel = (e.status || 'active').charAt(0).toUpperCase() + (e.status || 'active').slice(1);
+                 return `
+                   <tr id="enroll-row-${e.id}">
+                     <td>
+                       <div style="display:flex;align-items:center;gap:8px">
+                         <div class="users-table-avatar" style="background:${color};width:30px;height:30px;font-size:11px;flex-shrink:0">${Utils.initials(s.full_name || '?')}</div>
+                         <div>
+                           <div style="font-weight:600;font-size:var(--font-size-sm)">${Utils.esc(s.full_name || 'Unknown')}</div>
+                           ${s.phone ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(s.phone)}</div>` : ''}
+                         </div>
+                       </div>
+                     </td>
+                     <td style="min-width:170px">
+                       <div style="display:flex;align-items:center;gap:6px">
+                         <div style="flex:1">
+                           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+                             <span id="prog-lbl-${e.id}" style="font-size:11px;font-weight:700;color:${progColor}">${prog}%</span>
+                           </div>
+                           <div style="height:6px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden">
+                             <div id="prog-bar-${e.id}" style="height:100%;width:${prog}%;background:${progColor};border-radius:4px;transition:width .3s ease"></div>
+                           </div>
+                         </div>
+                         <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
+                           <button class="btn-prog-step" title="Decrease by step"
+                             onclick="CoursesPage.stepProgress('${e.id}', -1, '${levelId}')">
+                             <i class="fas fa-minus"></i>
+                           </button>
+                           <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
+                             <input type="number" min="0" max="100"
+                               id="prog-val-${e.id}" value="${prog}" data-current="${prog}"
+                               style="width:46px;padding:2px 4px;font-size:11px;font-weight:700;text-align:center;border:1px solid var(--border-color);border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary)"
+                               title="Edit &amp; Enter to save"
+                               onkeydown="if(event.key==='Enter'){CoursesPage.saveProgress('${e.id}', this.value, '${levelId}');this.blur();}" />
+                             <div style="display:flex;align-items:center;gap:3px">
+                               <span style="font-size:9px;color:var(--text-muted)">step</span>
+                               <input type="number" min="1" max="100" id="prog-step-${e.id}" value="5"
+                                 style="width:34px;padding:1px 3px;font-size:10px;text-align:center;border:1px solid var(--border-color);border-radius:var(--radius-sm);background:var(--bg-tertiary);color:var(--text-secondary)"
+                                 title="Step size" />
+                             </div>
+                           </div>
+                           <button class="btn-prog-step" title="Increase by step"
+                             onclick="CoursesPage.stepProgress('${e.id}', +1, '${levelId}')">
+                             <i class="fas fa-plus"></i>
+                           </button>
+                         </div>
+                       </div>
+                     </td>
+                     <td style="min-width:160px">
+                       ${levelSlots.length > 0
+                         ? `<select class="form-select" style="padding:3px 8px;font-size:var(--font-size-xs);width:100%"
+                               onchange="CoursesPage.changeEnrollSlot('${e.id}', this.value, '${levelId}')">
+                               <option value="">— Assign slot —</option>
+                               ${slotOpts}
+                             </select>`
+                         : `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">No slots defined</span>`
+                       }
+                     </td>
+                     <td style="min-width:120px">
+                       <input type="date"
+                         value="${e.start_date ? e.start_date.slice(0,10) : (e.enrolled_at ? e.enrolled_at.slice(0,10) : '')}"
+                         style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
+                         onchange="CoursesPage.saveEnrollDate('${e.id}', 'start', this.value, '${levelId}')" />
+                     </td>
+                     <td style="min-width:120px">
+                       <input type="date"
+                         value="${e.end_date ? e.end_date.slice(0,10) : ''}"
+                         style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
+                         onchange="CoursesPage.saveEnrollDate('${e.id}', 'end', this.value, '${levelId}')" />
+                     </td>
+                     <td style="text-align:center">
+                       <span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;color:${attCount > 0 ? 'var(--text-primary)' : 'var(--text-muted)'}">
+                         <i class="fas fa-clipboard-check" style="font-size:9px;color:${attCount > 0 ? '#22c55e' : 'var(--text-muted)'}"></i>
+                         ${attCount}
+                       </span>
+                     </td>
+                     <td style="text-align:center">
+                       <button class="btn btn-icon btn-sm"
+                         title="${hasAssessment ? '✅ Assessment done — click to view/add' : 'No assessment yet — click to assess'}"
+                         style="${hasAssessment
+                           ? 'background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.35)'
+                           : 'background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-color);opacity:.7'}"
+                         onclick="CoursesPage.goToAssessment('${s.id}', '${levelId}')">
+                         <i class="fas fa-chart-bar"></i>
+                         ${hasAssessment ? '<i class="fas fa-check" style="font-size:8px;margin-left:2px;color:#22c55e"></i>' : ''}
+                       </button>
+                     </td>
+                     <td style="min-width:130px">
+                       <input type="text" value="${Utils.esc(e.notes || '')}" placeholder="Notes…"
+                         style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
+                         onblur="CoursesPage.saveEnrollNotes('${e.id}', this.value, '${levelId}')"
+                         onkeydown="if(event.key==='Enter'){this.blur()}" />
+                     </td>
+                     <td style="white-space:nowrap">
+                       <div style="display:flex;align-items:center;gap:4px">
+                         <button
+                           title="Click to toggle Active / Inactive"
+                           style="display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:700;background:${cfg.bg};color:${cfg.color};border:1px solid ${cfg.color}40;cursor:pointer;white-space:nowrap;transition:all .15s"
+                           onclick="CoursesPage.cycleEnrollStatus('${e.id}', '${e.status}', '${levelId}')">
+                           <i class="fas ${cfg.icon}" style="font-size:9px"></i>${statusLabel}
+                         </button>
+                         <button
+                           title="Mark as Completed — saves to archive"
+                           style="display:inline-flex;align-items:center;gap:4px;padding:3px 7px;border-radius:20px;font-size:10px;background:rgba(59,130,246,.1);color:#3b82f6;border:1px solid rgba(59,130,246,.3);cursor:pointer;transition:all .15s"
+                           onclick="CoursesPage.markCompleted('${e.id}', '${Utils.esc(s.full_name || '')}', '${levelId}', '${e.end_date ? e.end_date.slice(0,10) : ''}', ${attCountMap[e.id] ?? 0}, '${Utils.esc(e.schedule_slot || '')}', '${Utils.esc(e.notes || '')}', '${e.start_date ? e.start_date.slice(0,10) : ''}')">
+                           <i class="fas fa-flag-checkered" style="font-size:9px"></i>Done
+                         </button>
+                       </div>
+                     </td>
+                     <td style="text-align:right;white-space:nowrap">
+                       <button class="btn btn-danger btn-icon btn-sm" title="Remove from level"
+                         onclick="CoursesPage.removeEnrollment('${e.id}', '${Utils.esc(s.full_name || 'this student')}', '${levelId}')">
+                         <i class="fas fa-user-minus"></i>
+                       </button>
+                     </td>
+                   </tr>
+                 `;
+               }).join('')}
+             </tbody>
+           </table>
+         </div>`;
+
+    // ── Tab 2: Completed (from level_completions) ─────────────────────────
+    const completedContent = completions.length === 0
+      ? `<div style="text-align:center;padding:1.5rem;color:var(--text-muted);background:var(--bg-secondary);border-radius:var(--radius-md)">
+           <i class="fas fa-flag-checkered" style="font-size:1.5rem;margin-bottom:8px;display:block;opacity:.4"></i>
+           <p style="font-size:var(--font-size-sm);margin:0">No students have completed this level yet.</p>
+           <p style="font-size:var(--font-size-xs);margin-top:4px;color:var(--text-muted)">
+             Use the <strong>Done</strong> button in the In Progress tab to archive a completion.
+           </p>
+         </div>`
+      : `<div style="border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border-color)">
+           <table class="table" style="margin:0">
+             <thead>
+               <tr>
+                 <th>Student</th>
+                 <th>Schedule Slot</th>
+                 <th>Start Date</th>
+                 <th>Completed</th>
+                 <th style="text-align:center">Att.</th>
+                 <th>Notes</th>
+                 <th style="text-align:right">Actions</th>
+               </tr>
+             </thead>
+             <tbody>
+               ${completions.map(c => {
+                 const st    = c.student || {};
+                 const color = st.avatar_color || Utils.avatarColor(st.full_name);
+                 const slot  = c.schedule_slot || '—';
+                 const startD = c.start_date ? c.start_date.slice(0,10) : '—';
+                 const endD   = c.end_date   ? c.end_date.slice(0,10)   : '—';
+                 const att    = c.attendance_count ?? 0;
+                 return `
+                   <tr id="comp-row-${c.id}">
+                     <td>
+                       <div style="display:flex;align-items:center;gap:8px">
+                         <div class="users-table-avatar" style="background:${color};width:30px;height:30px;font-size:11px;flex-shrink:0">${Utils.initials(st.full_name || '?')}</div>
+                         <div>
+                           <div style="font-weight:600;font-size:var(--font-size-sm)">${Utils.esc(st.full_name || 'Unknown')}</div>
+                           ${st.phone ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(st.phone)}</div>` : ''}
+                         </div>
+                       </div>
+                     </td>
+                     <td>
+                       ${c.schedule_slot
+                         ? `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(99,102,241,.1);color:#818cf8;border:1px solid rgba(99,102,241,.25);border-radius:20px;padding:2px 8px;font-size:10px;font-weight:600">
+                              <i class="fas fa-clock" style="font-size:9px"></i>${Utils.esc(slot)}
+                            </span>`
+                         : `<span style="color:var(--text-muted);font-size:10px;font-style:italic">—</span>`
+                       }
+                     </td>
+                     <td style="font-size:var(--font-size-xs);color:var(--text-secondary)">${startD}</td>
+                     <td>
+                       <span style="display:inline-flex;align-items:center;gap:4px;background:rgba(34,197,94,.1);color:#22c55e;border:1px solid rgba(34,197,94,.25);border-radius:20px;padding:2px 8px;font-size:10px;font-weight:600">
+                         <i class="fas fa-check-circle" style="font-size:9px"></i>${endD}
+                       </span>
+                     </td>
+                     <td style="text-align:center">
+                       <span style="display:inline-flex;align-items:center;gap:3px;font-size:11px;font-weight:600;color:${att > 0 ? 'var(--text-primary)' : 'var(--text-muted)'}">
+                         <i class="fas fa-clipboard-check" style="font-size:9px;color:${att > 0 ? '#22c55e' : 'var(--text-muted)'}"></i>${att}
+                       </span>
+                     </td>
+                     <td style="min-width:130px">
+                       <input type="text" value="${Utils.esc(c.notes || '')}" placeholder="Notes…"
+                         style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
+                         onblur="CoursesPage.saveCompletionNotes('${c.id}', this.value, '${levelId}')"
+                         onkeydown="if(event.key==='Enter'){this.blur()}" />
+                     </td>
+                     <td style="text-align:right;white-space:nowrap">
+                       <button class="btn btn-secondary btn-sm"
+                         title="Revert — remove this completion and re-activate enrollment"
+                         style="font-size:11px"
+                         onclick="CoursesPage.revertCompletion('${c.id}', '${c.enrollment_id || ''}', '${Utils.esc(st.full_name || '')}', '${levelId}')">
+                         <i class="fas fa-undo"></i> Revert
+                       </button>
+                       <button class="btn btn-danger btn-icon btn-sm"
+                         title="Delete this completion record permanently"
+                         onclick="CoursesPage.deleteCompletion('${c.id}', '${Utils.esc(st.full_name || '')}', '${levelId}')">
+                         <i class="fas fa-trash"></i>
+                       </button>
+                     </td>
+                   </tr>
+                 `;
+               }).join('')}
+             </tbody>
+           </table>
+         </div>`;
+
+    // ── Assemble: header + 2 tabs ─────────────────────────────────────────
     return `
       <div>
-        <!-- Header row -->
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+        <!-- Panel header -->
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
           <div style="font-weight:600;font-size:var(--font-size-sm)">
             <i class="fas fa-users" style="color:var(--brand-primary)"></i>
-            Enrolled Students
-            <span class="badge badge-blue" style="margin-left:6px">${enrollments.length}</span>
+            Students
+            <span class="badge badge-blue" style="margin-left:6px" title="In progress">${inProgress.length}</span>
+            <span class="badge" style="margin-left:4px;background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.3)" title="Completed">${completions.length} ✓</span>
           </div>
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-            ${enrollments.length > 0 ? `
+            ${inProgress.length > 0 ? `
               <button class="btn btn-sm btn-secondary"
                 onclick="CoursesPage.resetAllProgress('${levelId}')"
-                title="Set all enrolled students to 50%"
+                title="Set all in-progress students to 50%"
                 style="font-size:11px">
                 <i class="fas fa-redo-alt" style="margin-right:4px"></i>Reset all to 50%
               </button>` : ''}
@@ -492,173 +774,57 @@ const CoursesPage = {
           </div>
         </div>
 
-        <!-- Enrolled students table -->
-        ${enrollments.length === 0
-          ? `<div style="text-align:center;padding:1.5rem;color:var(--text-muted);background:var(--bg-secondary);border-radius:var(--radius-md)">
-               <i class="fas fa-user-slash" style="font-size:1.5rem;margin-bottom:8px;display:block"></i>
-               <p style="font-size:var(--font-size-sm);margin:0">No students enrolled in this level yet.</p>
-               <button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="CoursesPage.openEnrollModal('${levelId}')">
-                 <i class="fas fa-plus"></i> Add First Student
-               </button>
-             </div>`
-          : `<div style="border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border-color)">
-               <table class="table" style="margin:0">
-                 <thead>
-                   <tr>
-                     <th>Student</th>
-                     <th>Progress</th>
-                     <th>Schedule Slot</th>
-                     <th>Start Date</th>
-                     <th>End Date</th>
-                     <th>Notes</th>
-                     <th>Status</th>
-                     <th style="text-align:right">Actions</th>
-                   </tr>
-                 </thead>
-                 <tbody>
-                   ${enrollments.map(e => {
-                     const s    = e.student || {};
-                     const color = s.avatar_color || Utils.avatarColor(s.full_name);
-                     const prog  = e.level_progress ?? 0;
-                     const progColor = prog >= 80 ? 'var(--brand-primary)' : prog >= 40 ? '#f97316' : '#ef4444';
-                     const hasAssessment = assessedStudentIds.has(e.student_id);
-                     const slotOpts = levelSlots.map(sl => {
-                       const key = this._slotKey(sl);
-                       const lbl = sl.label ? `${sl.label} (${key})` : key;
-                       return `<option value="${Utils.esc(key)}" ${e.schedule_slot===key?'selected':''}>${Utils.esc(lbl)}</option>`;
-                     }).join('');
-                     return `
-                       <tr id="enroll-row-${e.id}">
-                         <td>
-                           <div style="display:flex;align-items:center;gap:8px">
-                             <div class="users-table-avatar" style="background:${color};width:30px;height:30px;font-size:11px;flex-shrink:0">${Utils.initials(s.full_name || '?')}</div>
-                             <div>
-                               <div style="font-weight:600;font-size:var(--font-size-sm)">${Utils.esc(s.full_name || 'Unknown')}</div>
-                               ${s.phone ? `<div style="font-size:var(--font-size-xs);color:var(--text-muted)">${Utils.esc(s.phone)}</div>` : ''}
-                             </div>
-                           </div>
-                         </td>
-                         <td style="min-width:170px">
-                           <div style="display:flex;align-items:center;gap:6px">
-                             <div style="flex:1">
-                               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
-                                 <span id="prog-lbl-${e.id}"
-                                   style="font-size:11px;font-weight:700;color:${progColor}">
-                                   ${prog}%
-                                 </span>
-                               </div>
-                               <div style="height:6px;background:var(--bg-tertiary);border-radius:4px;overflow:hidden">
-                                 <div id="prog-bar-${e.id}"
-                                   style="height:100%;width:${prog}%;background:${progColor};
-                                          border-radius:4px;transition:width .3s ease">
-                                 </div>
-                               </div>
-                             </div>
-                             <div style="display:flex;align-items:center;gap:4px;flex-shrink:0">
-                               <button class="btn-prog-step" title="Decrease by step"
-                                 onclick="CoursesPage.stepProgress('${e.id}', -1, '${levelId}')">
-                                 <i class="fas fa-minus"></i>
-                               </button>
-                               <div style="display:flex;flex-direction:column;align-items:center;gap:2px">
-                                 <input type="number" min="0" max="100"
-                                   id="prog-val-${e.id}"
-                                   value="${prog}"
-                                   data-current="${prog}"
-                                   style="width:46px;padding:2px 4px;font-size:11px;font-weight:700;
-                                          text-align:center;border:1px solid var(--border-color);
-                                          border-radius:var(--radius-sm);background:var(--bg-card);
-                                          color:var(--text-primary)"
-                                   title="Current value — edit &amp; Enter to save, or use +/− buttons"
-                                   onkeydown="if(event.key==='Enter'){CoursesPage.saveProgress('${e.id}', this.value, '${levelId}');this.blur();}" />
-                                 <div style="display:flex;align-items:center;gap:3px">
-                                   <span style="font-size:9px;color:var(--text-muted)">step</span>
-                                   <input type="number" min="1" max="100"
-                                     id="prog-step-${e.id}"
-                                     value="5"
-                                     style="width:34px;padding:1px 3px;font-size:10px;
-                                            text-align:center;border:1px solid var(--border-color);
-                                            border-radius:var(--radius-sm);background:var(--bg-tertiary);
-                                            color:var(--text-secondary)"
-                                     title="Step size for + / − buttons" />
-                                 </div>
-                               </div>
-                               <button class="btn-prog-step" title="Increase by step"
-                                 onclick="CoursesPage.stepProgress('${e.id}', +1, '${levelId}')">
-                                 <i class="fas fa-plus"></i>
-                               </button>
-                             </div>
-                           </div>
-                         </td>
-                         <td style="min-width:160px">
-                           ${levelSlots.length > 0
-                             ? `<select class="form-select" style="padding:3px 8px;font-size:var(--font-size-xs);width:100%"
-                                 onchange="CoursesPage.changeEnrollSlot('${e.id}', this.value, '${levelId}')">
-                                 <option value="">— Assign slot —</option>
-                                 ${slotOpts}
-                               </select>`
-                             : `<span style="font-size:var(--font-size-xs);color:var(--text-muted)">No slots defined</span>`
-                           }
-                         </td>
-                         <!-- Start Date -->
-                         <td style="min-width:120px">
-                           <input type="date"
-                             value="${e.start_date ? e.start_date.slice(0,10) : (e.enrolled_at ? e.enrolled_at.slice(0,10) : '')}"
-                             style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);
-                                    border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
-                             onchange="CoursesPage.saveEnrollDate('${e.id}', 'start', this.value, '${levelId}')" />
-                         </td>
-                         <!-- End Date -->
-                         <td style="min-width:120px">
-                           <input type="date"
-                             value="${e.end_date ? e.end_date.slice(0,10) : ''}"
-                             style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);
-                                    border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
-                             onchange="CoursesPage.saveEnrollDate('${e.id}', 'end', this.value, '${levelId}')" />
-                         </td>
-                         <!-- Notes -->
-                         <td style="min-width:140px">
-                           <input type="text"
-                             value="${Utils.esc(e.notes || '')}"
-                             placeholder="Notes…"
-                             style="font-size:11px;padding:2px 5px;border:1px solid var(--border-color);
-                                    border-radius:var(--radius-sm);background:var(--bg-card);color:var(--text-primary);width:100%"
-                             onblur="CoursesPage.saveEnrollNotes('${e.id}', this.value, '${levelId}')"
-                             onkeydown="if(event.key==='Enter'){this.blur()}" />
-                         </td>
-                         <!-- Status -->
-                         <td>
-                           <select class="form-select" style="padding:3px 8px;font-size:var(--font-size-xs);width:110px"
-                             onchange="CoursesPage.changeEnrollStatus('${e.id}', this.value, '${levelId}')">
-                             ${['active','inactive','completed','dropped'].map(st =>
-                               `<option value="${st}" ${e.status===st?'selected':''}>${st.charAt(0).toUpperCase()+st.slice(1)}</option>`
-                             ).join('')}
-                           </select>
-                         </td>
-                         <!-- Actions -->
-                         <td style="text-align:right;white-space:nowrap">
-                           <button class="btn btn-icon btn-sm"
-                             title="${hasAssessment ? '✅ Assessment done for this level — click to view/add' : 'No assessment yet — click to assess'}"
-                             style="${hasAssessment
-                               ? 'background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.35)'
-                               : 'background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-color)'}"
-                             onclick="CoursesPage.goToAssessment('${s.id}', '${levelId}')">
-                             <i class="fas fa-chart-bar"></i>
-                             ${hasAssessment ? '<i class="fas fa-check" style="font-size:8px;margin-left:2px;color:#22c55e"></i>' : ''}
-                           </button>
-                           <button class="btn btn-danger btn-icon btn-sm" title="Remove from level"
-                             onclick="CoursesPage.removeEnrollment('${e.id}', '${Utils.esc(s.full_name || 'this student')}', '${levelId}')">
-                             <i class="fas fa-user-minus"></i>
-                           </button>
-                         </td>
-                       </tr>
-                     `;
-                   }).join('')}
-                 </tbody>
-               </table>
-             </div>`
-        }
+        <!-- Tab buttons -->
+        <div style="display:flex;border-bottom:2px solid var(--border-color);margin-bottom:12px;gap:0">
+          <button id="${tabId}-btn-progress"
+            onclick="CoursesPage._switchEnrollTab('${levelId}', 'progress')"
+            style="padding:7px 18px;font-size:12px;font-weight:600;border:none;background:none;cursor:pointer;
+                   border-bottom:2px solid var(--brand-primary);margin-bottom:-2px;
+                   color:var(--brand-primary);transition:all .15s">
+            <i class="fas fa-spinner" style="margin-right:5px"></i>In Progress
+            <span class="badge badge-blue" style="margin-left:5px">${inProgress.length}</span>
+          </button>
+          <button id="${tabId}-btn-completed"
+            onclick="CoursesPage._switchEnrollTab('${levelId}', 'completed')"
+            style="padding:7px 18px;font-size:12px;font-weight:600;border:none;background:none;cursor:pointer;
+                   border-bottom:2px solid transparent;margin-bottom:-2px;
+                   color:var(--text-muted);transition:all .15s">
+            <i class="fas fa-flag-checkered" style="margin-right:5px"></i>Completed
+            <span class="badge" style="margin-left:5px;background:rgba(34,197,94,.15);color:#22c55e">${completions.length}</span>
+          </button>
+        </div>
+
+        <!-- Tab panels -->
+        <div id="${tabId}-panel-progress">${inProgressContent}</div>
+        <div id="${tabId}-panel-completed" style="display:none">${completedContent}</div>
       </div>
     `;
+  },
+
+  // Switch between In Progress / Completed tabs
+  _switchEnrollTab(levelId, tab) {
+    const tabId = `ep-tab-${levelId}`;
+    const progressPanel   = document.getElementById(`${tabId}-panel-progress`);
+    const completedPanel  = document.getElementById(`${tabId}-panel-completed`);
+    const progressBtn     = document.getElementById(`${tabId}-btn-progress`);
+    const completedBtn    = document.getElementById(`${tabId}-btn-completed`);
+    if (!progressPanel || !completedPanel) return;
+
+    if (tab === 'progress') {
+      progressPanel.style.display  = '';
+      completedPanel.style.display = 'none';
+      progressBtn.style.borderBottomColor  = 'var(--brand-primary)';
+      progressBtn.style.color              = 'var(--brand-primary)';
+      completedBtn.style.borderBottomColor = 'transparent';
+      completedBtn.style.color             = 'var(--text-muted)';
+    } else {
+      progressPanel.style.display  = 'none';
+      completedPanel.style.display = '';
+      completedBtn.style.borderBottomColor = '#22c55e';
+      completedBtn.style.color             = '#22c55e';
+      progressBtn.style.borderBottomColor  = 'transparent';
+      progressBtn.style.color              = 'var(--text-muted)';
+    }
   },
 
   openEnrollModal(levelId) {
@@ -912,13 +1078,95 @@ const CoursesPage = {
   },
 
   async changeEnrollStatus(enrollmentId, newStatus, levelId) {
-    const { error } = await DB.setEnrollmentStatus(enrollmentId, newStatus);
-    if (error) {
-      Toast.error('Failed to update enrollment status');
-      return;
+    const patch = { status: newStatus };
+    // Auto-set end_date to today when marking completed (if not already set)
+    if (newStatus === 'completed') {
+      const { data: enr } = await DB.getOne('enrollments', enrollmentId);
+      if (enr && !enr.end_date) patch.end_date = Utils.localDateISO();
     }
+    const { error } = await DB.updateEnrollment(enrollmentId, patch);
+    if (error) { Toast.error('Failed to update enrollment status'); return; }
     Toast.success(`Status updated to "${newStatus}"`);
-    // Refresh the panel silently
+    await this.loadEnrollmentPanel(levelId);
+  },
+
+  // Cycle through statuses via the badge button (active → inactive → active)
+  async cycleEnrollStatus(enrollmentId, currentStatus, levelId) {
+    const cycle = { active: 'inactive', inactive: 'active', completed: 'active', dropped: 'active' };
+    const next = cycle[currentStatus] || 'active';
+    await this.changeEnrollStatus(enrollmentId, next, levelId);
+  },
+
+  // Mark a student as "Completed"
+  // attCount, slot, notes, startDate are passed in from the button in the row
+  async markCompleted(enrollmentId, studentName, levelId, currentEndDate, attCount = 0, slot = '', notes = '', startDate = '') {
+    const today = Utils.localDateISO();
+    const endDateVal = currentEndDate || today;
+
+    // Store extra data on the modal so _confirmMarkCompleted can read them
+    this._pendingCompletion = { enrollmentId, levelId, attCount: Number(attCount), slot, notes, startDate };
+
+    Modal.open(`Mark ${Utils.esc(studentName)} as Completed`, `
+      <p style="color:var(--text-muted);font-size:var(--font-size-sm);margin-bottom:1.2rem">
+        This will archive <strong>${Utils.esc(studentName)}</strong>'s record to the
+        <strong>Completed Students</strong> registry (permanent — survives future re-enrollment).
+      </p>
+      <div class="form-group">
+        <label class="form-label">Completion Date (End Date)</label>
+        <input type="date" id="complete-end-date" class="form-input" value="${endDateVal}" />
+        <p style="font-size:var(--font-size-xs);color:var(--text-muted);margin-top:4px">
+          Attendance sessions captured: <strong>${Number(attCount)}</strong>
+        </p>
+      </div>
+      <div class="modal-footer" style="padding:0;border:none;margin-top:1.2rem">
+        <button class="btn btn-ghost" onclick="Modal.close()">Cancel</button>
+        <button class="btn btn-primary" onclick="CoursesPage._confirmMarkCompleted()">
+          <i class="fas fa-flag-checkered"></i> Confirm Completion
+        </button>
+      </div>
+    `);
+  },
+
+  async _confirmMarkCompleted() {
+    const endDate = document.getElementById('complete-end-date')?.value || Utils.localDateISO();
+    const { enrollmentId, levelId, attCount, slot, notes, startDate } = this._pendingCompletion || {};
+    if (!enrollmentId || !levelId) { Modal.close(); return; }
+    Modal.close();
+
+    // 1. Fetch the enrollment to get student_id and course_id
+    const { data: enr, error: fetchErr } = await DB.getOne('enrollments', enrollmentId);
+    if (fetchErr || !enr) { Toast.error('Could not load enrollment data'); return; }
+
+    // 2. Resolve course_id from the level
+    const level = this._levels?.find(l => l.id === levelId);
+    const courseId = level?.course_id || this.currentCourse?.id || null;
+
+    // 3. Write snapshot to level_completions
+    const { error: compErr } = await DB.createLevelCompletion({
+      student_id:       enr.student_id,
+      level_id:         levelId,
+      course_id:        courseId,
+      enrollment_id:    enrollmentId,   // soft link — no FK
+      start_date:       startDate || enr.start_date || null,
+      end_date:         endDate,
+      attendance_count: attCount ?? 0,
+      schedule_slot:    slot || enr.schedule_slot || null,
+      notes:            notes || enr.notes || null,
+      completed_at:     new Date().toISOString(),
+    });
+    if (compErr) { Toast.error('Failed to save completion record: ' + compErr.message); return; }
+
+    // 4. Remove the enrollment row (so the student can be re-enrolled later freely)
+    //    The history is now safely in level_completions.
+    const { error: delErr } = await DB.unenrollStudent(enrollmentId);
+    if (delErr) {
+      // Non-fatal: completion was already saved — just warn
+      Toast.warning('Completion saved but could not remove enrollment row: ' + delErr.message);
+    } else {
+      Toast.success('Student marked as completed ✅ — archived to Completed Students');
+    }
+
+    this._pendingCompletion = null;
     await this.loadEnrollmentPanel(levelId);
   },
 
@@ -930,6 +1178,50 @@ const CoursesPage = {
       return;
     }
     Toast.success(`${studentName} removed from level`);
+    await this.loadEnrollmentPanel(levelId);
+  },
+
+  // Save notes on a level_completions row (Completed tab)
+  async saveCompletionNotes(completionId, value, levelId) {
+    const { error } = await DB.updateLevelCompletion(completionId, { notes: value || null });
+    if (error) Toast.error('Failed to save notes');
+    // silent save
+  },
+
+  // Revert a completion: delete the level_completions row + re-enroll the student
+  async revertCompletion(completionId, enrollmentId, studentName, levelId) {
+    if (!confirm(`Revert completion for ${studentName}?\nThis will remove the completion record and re-enroll them as Active.`)) return;
+
+    // 1. Load the completion to get student + dates
+    const { data: comp } = await DB.getOne('level_completions', completionId);
+    if (!comp) { Toast.error('Completion record not found'); return; }
+
+    // 2. Delete the completion record
+    const { error: delErr } = await DB.deleteLevelCompletion(completionId);
+    if (delErr) { Toast.error('Failed to remove completion: ' + delErr.message); return; }
+
+    // 3. Re-enroll the student (active)
+    const { error: enrErr } = await DB.enrollStudent(
+      comp.student_id, comp.level_id, 'active',
+      comp.schedule_slot || null,
+      Utils.localDateISO(),  // new start date = today
+      null, comp.notes || null
+    );
+    if (enrErr) {
+      Toast.warning('Completion removed but re-enrollment failed: ' + enrErr.message);
+    } else {
+      Toast.success(`${studentName} reverted to Active ↩`);
+    }
+
+    await this.loadEnrollmentPanel(levelId);
+  },
+
+  // Hard-delete a completion record (no re-enrollment)
+  async deleteCompletion(completionId, studentName, levelId) {
+    if (!confirm(`Permanently delete the completion record for ${studentName}?\nThis cannot be undone.`)) return;
+    const { error } = await DB.deleteLevelCompletion(completionId);
+    if (error) { Toast.error(error.message || 'Failed to delete'); return; }
+    Toast.success('Completion record deleted');
     await this.loadEnrollmentPanel(levelId);
   },
 
