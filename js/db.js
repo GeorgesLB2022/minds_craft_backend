@@ -722,6 +722,49 @@ const DB = {
   async deleteRole(id) { return this.remove('roles', id); },
 
   // ─────────────────────────────────────────────
+  // LEVEL COMPLETIONS  (permanent archive — M17)
+  // Separate table, no FK to enrollments so history
+  // survives when a student is removed from a level
+  // and re-enrolled later.
+  // ─────────────────────────────────────────────
+
+  /**
+   * Create a completion snapshot row.
+   * Call this when a student is marked "Done" in any level.
+   * Expected fields: student_id, level_id, course_id, enrollment_id (soft),
+   *   start_date, end_date, attendance_count, schedule_slot, notes
+   */
+  async createLevelCompletion(data) {
+    return this.insert('level_completions', data);
+  },
+
+  /**
+   * Fetch all completion records with joined student / level / course info.
+   * Accepts same opts as getAll() for extra filters (e.g. filter: { level_id: id }).
+   */
+  async getLevelCompletions(opts = {}) {
+    return this.getAll('level_completions', {
+      select: `*,
+        student:student_id(id, full_name, avatar_color, phone),
+        level:level_id(id, name),
+        course:course_id(id, name)`,
+      order: 'end_date',
+      asc:   false,
+      ...opts,
+    });
+  },
+
+  /** Partial-update a completion row (e.g. fix notes or dates) */
+  async updateLevelCompletion(id, data) {
+    return this.update('level_completions', id, data);
+  },
+
+  /** Hard-delete a completion row (use for "Revert to Active" + admin remove) */
+  async deleteLevelCompletion(id) {
+    return this.remove('level_completions', id);
+  },
+
+  // ─────────────────────────────────────────────
   // DASHBOARD STATS
   // ─────────────────────────────────────────────
   async getDashboardStats() {
