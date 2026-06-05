@@ -1478,7 +1478,13 @@ const NotificationsPage = {
         const classTime = fmtTime(slot.start_time);
         const classDay  = slot.day_of_week;
 
-        // Fetch enrolled students for this level
+        // Build the canonical slot key the same way courses.js does:
+        // "Thursday 16:00-17:00"  or  "Thursday 16:00"
+        const slotKey = slot.start_time
+          ? `${slot.day_of_week} ${slot.start_time}${slot.end_time ? '-' + slot.end_time : ''}`
+          : slot.day_of_week;
+
+        // Fetch enrolled students for this level (active only)
         const { data: enrollments } = await DB.getLevelEnrollments(slot.level_id);
         if (!enrollments || !enrollments.length) continue;
 
@@ -1486,7 +1492,15 @@ const NotificationsPage = {
           const student = enr.student;
           if (!student) continue;
 
-          const dedupKey = `${student.id}__${slot.level_id}__${slot.day_of_week}__${todayDateStr}`;
+          // ── Slot filtering ────────────────────────────────────────────
+          // If the enrollment has a schedule_slot assigned, only notify
+          // when that slot matches the current slot being processed.
+          // If no slot is assigned (legacy / unassigned), always include.
+          if (enr.schedule_slot && enr.schedule_slot !== slotKey) continue;
+
+          // Dedup key now includes the exact slot key so kids with different
+          // slots in the same level are tracked independently.
+          const dedupKey = `${student.id}__${slot.level_id}__${slotKey}__${todayDateStr}`;
           if (alreadySent.has(dedupKey)) continue;
 
           // Build base template vars
