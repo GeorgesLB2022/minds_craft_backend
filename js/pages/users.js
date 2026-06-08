@@ -493,6 +493,11 @@ const UsersPage = {
   // ── Helper: attempt Supabase Auth signUp for a parent ────────────────────
   // Password is always the normalized phone (+961XXXXXXXX).
   // Returns { authId, password, alreadyExists } or throws.
+  //
+  // KEY FIX: when alreadyExists=true we immediately look up the real auth_id
+  // via the Admin API (listUsers) so it can be saved to public.users.auth_id.
+  // Without this, alreadyExists parents would have auth_id=NULL forever and
+  // never receive push notifications.
   async _createParentAuthAccount(email, password, fullName, publicUserId) {
     if (!email)    throw new Error('Email is required to create a parent portal login.');
     if (!password) throw new Error('Password (phone number) is required.');
@@ -518,7 +523,24 @@ const UsersPage = {
     if (error) {
       const msg = error.message.toLowerCase();
       if (msg.includes('already registered') || msg.includes('user already')) {
-        return { alreadyExists: true, authId: null, password };
+        // Account exists in Supabase Auth — look up its real UUID via Admin API
+        // so we can write it into public.users.auth_id (critical for push to work).
+        let existingAuthId = null;
+        try {
+          const { data: listData } = await DB.client.auth.admin.listUsers({ perPage: 1000 });
+          const match = (listData?.users || []).find(
+            u => (u.email || '').toLowerCase() === email.toLowerCase()
+          );
+          existingAuthId = match?.id || null;
+          if (existingAuthId) {
+            console.info('[createParent] alreadyExists — resolved auth_id via Admin API:', existingAuthId);
+          } else {
+            console.warn('[createParent] alreadyExists but Admin API found no match for:', email);
+          }
+        } catch (adminErr) {
+          console.warn('[createParent] Admin API lookup failed (alreadyExists):', adminErr.message);
+        }
+        return { alreadyExists: true, authId: existingAuthId, password };
       }
       throw error;
     }
@@ -528,6 +550,29 @@ const UsersPage = {
     const authId = data?.user?.id || null;
     const needsConfirm = !data?.user?.email_confirmed_at;
     return { alreadyExists: false, authId, password, needsConfirm };
+  },
+
+  // ── Helper: resolve auth_id for any parent by email ──────────────────────
+  // Used to retroactively link auth_id for parents whose account was created
+  // before this fix, or whose alreadyExists case was previously unhandled.
+  // Tries Admin API first (most reliable), then falls back to public.users row.
+  async _resolveParentAuthId(email) {
+    if (!email) return null;
+    try {
+      const { data: listData } = await DB.client.auth.admin.listUsers({ perPage: 1000 });
+      const match = (listData?.users || []).find(
+        u => (u.email || '').toLowerCase() === email.toLowerCase()
+      );
+      if (match?.id) return match.id;
+    } catch(e) {
+      console.warn('[resolveParentAuthId] Admin API failed:', e.message);
+    }
+    // Fallback: check what public.users already has
+    try {
+      const { data: rows } = await DB.getAll('users', { select: 'id,email,auth_id', limit: 2000 });
+      const row = (rows || []).find(r => (r.email || '').toLowerCase() === email.toLowerCase());
+      return row?.auth_id || null;
+    } catch(e) { return null; }
   },
 
   async saveUser(e, id) {
@@ -725,12 +770,19 @@ const UsersPage = {
             );
 
             if (authResult.alreadyExists) {
-              Toast.warning(`⚠️ ${data.email} already has a portal account. Password unchanged.`);
+              // Account existed — auth_id resolved via Admin API (see _createParentAuthAccount)
+              if (authResult.authId) {
+                await DB.updateUser(newId, { auth_id: authResult.authId });
+                console.info('[createParent] alreadyExists — auth_id linked:', authResult.authId);
+                Toast.warning(`⚠️ ${data.email} already has a portal account. auth_id linked ✅ — push notifications will work.`);
+              } else {
+                // Admin API also failed — show SQL fallback instructions
+                Toast.warning(`⚠️ ${data.email} already has a portal account. Could not resolve auth_id — run fix_parent_auth.html to link it manually.`);
+              }
             } else if (authResult.authId) {
-              // Save auth_id back to users row so push notifications work
+              // Fresh account — save auth_id so push notifications work immediately
               await DB.updateUser(newId, { auth_id: authResult.authId });
-              // Auto-confirm email via SQL note shown to admin
-              console.info('[createParent] auth_id saved:', authResult.authId);
+              console.info('[createParent] new account — auth_id saved:', authResult.authId);
             }
           } catch (authErr) {
             // Don't block user creation — just warn
@@ -775,13 +827,22 @@ const UsersPage = {
     const em = (email || '').replace(/'/g, "\\'");
 
     const statusHtml = alreadyExists
-      ? `<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
-           border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#fbbf24">
-           ⚠️ A Supabase Auth account already exists for this email — password was <strong>not</strong> changed.<br>
-           The existing password (phone number) still applies.<br><br>
-           <strong>Action required:</strong> run the SQL below in Supabase to link the <code>auth_id</code>
-           to this parent's record so push notifications work correctly.
-         </div>`
+      ? authId
+        // ── alreadyExists + auth_id resolved automatically ──
+        ? `<div style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);
+             border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#4ade80">
+             ✅ Supabase Auth account already existed — <strong>auth_id linked automatically</strong>.<br>
+             Push notifications are now active. Existing password (phone number) still applies.<br>
+             <span style="font-size:.78rem;color:#86efac;">auth_id: <code style="background:rgba(0,0,0,.3);padding:1px 5px;border-radius:3px">${Utils.esc(authId)}</code></span>
+           </div>`
+        // ── alreadyExists + auth_id NOT resolved (Admin API unavailable) ──
+        : `<div style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);
+             border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#fbbf24">
+             ⚠️ A Supabase Auth account already exists for this email — password was <strong>not</strong> changed.<br>
+             The existing password (phone number) still applies.<br><br>
+             <strong>auth_id could not be resolved automatically.</strong>
+             Run the SQL below in Supabase to link it and enable push notifications.
+           </div>`
       : authId
         ? `<div style="background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);
              border-radius:8px;padding:12px;margin-bottom:12px;font-size:.83rem;color:#4ade80">
