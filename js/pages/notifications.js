@@ -415,15 +415,22 @@ const NotificationsPage = {
       const typeMap  = { all: null, parents: 'parent', students: 'student', staff: 'staff' };
       const type     = typeMap[audience];
       const { data: users } = type ? await DB.getUsersByType(type) : await DB.getUsers();
-      // Use auth_id (= Supabase auth.uid()) as the push recipient identifier.
-      // Fallback to users.id only if auth_id is null (old records not yet linked).
+      // Use ONLY auth_id (= Supabase auth.uid()) as the push recipient identifier.
+      // NEVER fall back to users.id — it is a different UUID (public.users PK, not
+      // auth.users PK). Using it inserts rows that no parent can ever read because
+      // the RLS policy checks auth.uid() = parent_user_id, and auth.uid() is always
+      // the auth.users UUID, not the public.users UUID.
+      //
+      // If auth_id is NULL the push is skipped with a clear warning. The fix is:
+      //   Admin portal → Users → edit parent → save → auth_id auto-resolved.
+      //   Or: run fix_parent_auth.html to bulk-link existing parents.
       recipients = (users || []).map(u => ({
-        id:    u.auth_id || u.id,   // auth_id preferred; u.id as fallback (may fail RLS)
-        name:  u.full_name  || '',
-        email: u.email      || '',
-        phone: u.phone      || '',
-        _hasAuthId: !!u.auth_id,    // flag so we can warn about missing links
-      })).filter(u => u.email || u.phone);
+        id:         u.auth_id || null,  // null = no push for this recipient (safe skip)
+        name:       u.full_name  || '',
+        email:      u.email      || '',
+        phone:      u.phone      || '',
+        _hasAuthId: !!u.auth_id,
+      })).filter(u => u.email || u.phone);  // still keep non-push channels working
     }
 
     if (!recipients.length) return Toast.warning('No recipients found.');
@@ -446,9 +453,9 @@ const NotificationsPage = {
             const result = await this._sendEmail(r.email, title || "Notification — Minds' Craft", content);
             ok = result.ok;
           } else if (ch === 'push') {
-            // r.id = users.auth_id (set by lookup above).
+            // r.id = users.auth_id (Supabase auth.uid()) — set by lookup above.
             // parent_notifications.parent_user_id MUST equal Supabase auth.uid()
-            // of the parent — that is what the RLS policy checks.
+            // for the parent portal to read it. Never use public.users.id here.
             if (r.id) {
               const result = await this._sendPush(
                 r.id,
@@ -461,14 +468,14 @@ const NotificationsPage = {
               if (!ok) skipReason = result.error || 'DB insert failed';
               pushResults.push({ email: r.email, ok, error: result.error });
             } else {
-              // auth_id not set → run fix_push_notifications.html Step 2
-              skipReason = `auth_id not linked for "${r.email || r.name}". `
-                + `Open fix_push_notifications.html and complete Step 2 to link `
-                + `the parent's Supabase auth UID to their users record.`;
+              // auth_id is NULL — safe skip (inserting public.users.id would write
+              // an unreadable row — worse than skipping entirely).
+              skipReason = `auth_id NULL for "${r.email || r.name}" — push skipped safely.`
+                + ` Fix: Admin → Users → edit this parent → Save (auto-resolves auth_id)`
+                + ` or run fix_parent_auth.html for bulk repair.`;
               ok = false;
               pushResults.push({ email: r.email, ok: false, error: skipReason });
-              console.warn('[Broadcast] push skipped (no auth_id):', r.email);
-              Toast.warning(`⚠️ Push skipped: users.auth_id not set for ${r.email || r.name}. Run fix_push_notifications.html → Step 2.`);
+              console.warn('[Broadcast] push safely skipped — auth_id NULL for:', r.email);
             }
           } else if (ch === 'sms' && !r.phone) {
             skipReason = 'no phone number';
@@ -861,6 +868,7 @@ const NotificationsPage = {
       '{fname}','{lname}','{date}','{day_name}','{month_name}','{year}',
       '{package}','{expiry_date}','{days_left}','{start_date}','{end_date}','{amount}',
       '{class_name}','{level_name}','{class_time}','{class_day}','{course_name}',
+      '{student_fname}','{student_name}',
     ];
     const channels    = ['email','sms','push','whatsapp'];
     const ruleChannels = r?.channels || ['email'];
@@ -1032,11 +1040,10 @@ const NotificationsPage = {
   // Called externally: NotificationsPage.triggerRule('on_payment', { ... })
   // ─────────────────────────────────────────────────────────
   async triggerRule(triggerEvent, data = {}) {
-    // Load rules if not already loaded
-    if (!this.rules || !this.rules.length) {
-      const { data: rules } = await DB.getNotificationRules();
-      this.rules = rules || [];
-    }
+    // Always fetch fresh rules from DB at trigger time — never rely on stale
+    // in-memory cache (rules may have been created/updated since last page visit).
+    const { data: freshRules } = await DB.getNotificationRules();
+    this.rules = freshRules || [];
 
     const matchingRules = this.rules.filter(
       r => r.is_active && r.trigger_event === triggerEvent
@@ -1108,8 +1115,17 @@ const NotificationsPage = {
       if (target === 'student') {
         contacts = [studentContact];
       } else if (target === 'parent') {
-        // Use parent if found, otherwise fall back to student
-        contacts = [parentContact || studentContact];
+        // Only send to parent. If parent not found, skip push entirely rather
+        // than incorrectly sending to the student (wrong recipient, wrong auth_id).
+        if (parentContact) {
+          contacts = [parentContact];
+        } else {
+          console.warn(
+            '[triggerRule] target=parent but no parent found for student_id:',
+            data.student_id, '— push/email to parent skipped.'
+          );
+          contacts = []; // empty = no sends for this rule
+        }
       } else { // both
         contacts = [studentContact];
         if (parentContact) contacts.push(parentContact);
@@ -1127,11 +1143,14 @@ const NotificationsPage = {
 
         for (const contact of contacts) {
           // Merge contact vars so {fname} etc. resolve to the actual recipient
+          // student_fname / student_name are preserved from vars BEFORE overwriting with parent name
           const contactVars = {
             ...vars,
-            fname:    contact.name.split(' ')[0] || vars.fname,
-            lname:    contact.name.split(' ').slice(1).join(' ') || vars.lname,
-            full_name: contact.name || vars.full_name,
+            fname:         contact.name.split(' ')[0] || vars.fname,
+            lname:         contact.name.split(' ').slice(1).join(' ') || vars.lname,
+            full_name:     contact.name || vars.full_name,
+            student_fname: vars.fname,       // student's first name — unchanged even when contact = parent
+            student_name:  vars.full_name,   // student's full name  — unchanged even when contact = parent
           };
           const body = this._fillTemplate(
             template || this._defaultTriggerMsg(triggerEvent, contactVars), contactVars
@@ -1198,8 +1217,11 @@ const NotificationsPage = {
   },
 
   _defaultTriggerMsg(triggerEvent, vars) {
+    // When the recipient is a parent, student_fname differs from fname
+    const isParent = vars.student_fname && vars.student_fname !== vars.fname;
+    const studentRef = isParent ? `${vars.student_fname}'s` : 'your';
     if (triggerEvent === 'on_payment') {
-      return `Hi ${vars.fname}, your payment for "${vars.package}" has been received.`
+      return `Hi ${vars.fname}, ${studentRef} payment for "${vars.package}" has been received.`
         + (vars.amount    ? ` Amount: $${vars.amount}.`           : '')
         + (vars.end_date  ? ` Valid until: ${vars.expiry_date}.`  : '');
     }
@@ -1295,10 +1317,11 @@ const NotificationsPage = {
           end_date:    Utils.formatDate(alloc.end_date),
         };
 
-        // Build contacts list based on recipient_target — now includes userId for push
+        // Build contacts list based on recipient_target — userId MUST be auth_id (Supabase auth.uid())
         const studentContact = {
           name: student.full_name, email: student.email, phone: student.phone,
-          userId: student.id, label: 'student'
+          userId: student.auth_id || null,  // auth_id, NOT student.id (public.users PK ≠ auth.uid())
+          label: 'student'
         };
         let contacts = [studentContact];
 
@@ -1310,12 +1333,25 @@ const NotificationsPage = {
               if (parent) {
                 const parentContact = {
                   name: parent.full_name, email: parent.email, phone: parent.phone,
-                  userId: parent.id, label: 'parent'
+                  userId: parent.auth_id || null, // auth_id, NOT parent.id
+                  label: 'parent'
                 };
-                contacts = target === 'parent' ? [parentContact] : [studentContact, parentContact];
+                if (target === 'parent') {
+                  // Only parent — skip entirely if no parentContact rather than
+                  // falling back to student (wrong recipient + wrong auth_id)
+                  contacts = [parentContact];
+                } else {
+                  contacts = [studentContact, parentContact];
+                }
+              } else if (target === 'parent') {
+                contacts = []; // parent row not found — safe skip
               }
+            } else if (target === 'parent') {
+              contacts = []; // no parent_id on student — safe skip
             }
-          } catch(e) { /* parent lookup failed */ }
+          } catch(e) {
+            if (target === 'parent') contacts = []; // safe skip on error
+          }
         }
 
         for (const ch of (rule.channels || ['email'])) {
@@ -1324,8 +1360,10 @@ const NotificationsPage = {
           for (const contact of contacts) {
             const vars = {
               ...baseVars,
-              fname:     contact.name?.split(' ')[0] || baseVars.fname,
-              full_name: contact.name || baseVars.full_name,
+              fname:         contact.name?.split(' ')[0] || baseVars.fname,
+              full_name:     contact.name || baseVars.full_name,
+              student_fname: baseVars.fname,      // always = student first name
+              student_name:  baseVars.full_name,  // always = student full name
             };
             const template = ch === 'push'
               ? (rule.push_template || rule.email_template)
@@ -1544,9 +1582,15 @@ const NotificationsPage = {
           };
 
           let contacts = [];
-          if (target === 'parent')       contacts = [parentContact || studentContact];
-          else if (target === 'student') contacts = [studentContact];
-          else                           contacts = [studentContact, ...(parentContact ? [parentContact] : [])];
+          if (target === 'parent') {
+            // Only parent \u2014 never fall back to student (wrong recipient + wrong auth_id for push)
+            contacts = parentContact ? [parentContact] : [];
+          } else if (target === 'student') {
+            contacts = [studentContact];
+          } else {
+            // both
+            contacts = [studentContact, ...(parentContact ? [parentContact] : [])];
+          }
 
           for (const ch of (rule.channels || ['push'])) {
             const template = ch === 'push'
@@ -1559,10 +1603,12 @@ const NotificationsPage = {
             for (const contact of contacts) {
               const vars = {
                 ...baseVars,
-                fname:     contact.name?.split(' ')[0] || baseVars.fname,
-                full_name: contact.name || baseVars.full_name,
+                fname:         contact.name?.split(' ')[0] || baseVars.fname,
+                full_name:     contact.name || baseVars.full_name,
+                student_fname: baseVars.fname,      // always = student first name
+                student_name:  baseVars.full_name,  // always = student full name
               };
-              const defaultMsg = `Hi ${vars.fname}, reminder: ${vars.full_name.split(' ')[0]}'s ${vars.level_name} class` +
+              const defaultMsg = `Hi ${vars.fname}, reminder: ${vars.student_fname}'s ${vars.level_name} class` +
                 (vars.course_name ? ` (${vars.course_name})` : '') +
                 ` is today at ${vars.class_time}. See you there! — Minds' Craft`;
               const body = this._fillTemplate(template || defaultMsg, vars);
@@ -1624,7 +1670,9 @@ const NotificationsPage = {
   },
 
   _defaultExpiryMsg(vars) {
-    return `Hi ${vars.fname}, your subscription "${vars.package}" expires on ${vars.expiry_date} (in ${vars.days_left} days). Please renew to continue.`;
+    const isParent = vars.student_fname && vars.student_fname !== vars.fname;
+    const studentRef = isParent ? `${vars.student_fname}'s subscription` : `your subscription`;
+    return `Hi ${vars.fname}, ${studentRef} "${vars.package}" expires on ${vars.expiry_date} (in ${vars.days_left} days). Please renew to continue.`;
   },
 
   // ─────────────────────────────────────────────────────────
