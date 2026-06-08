@@ -356,45 +356,71 @@ Attendance table   ──► student_id + level_id + date + status
 
 ---
 
-## 👨‍👩‍👧 Parent Portal
+## 🔔 Push Notifications — How it works end-to-end
 
-A separate read-only web app for parents: `parent_portal.html`
+Push notifications are delivered by writing rows to `parent_notifications` in Supabase.  
+The parent's third-party app reads this table (filtered by `auth.uid()`).
 
-### How authentication works
-Parents log in with:
-- **Email** = their email address in `public.users`
-- **Password** = their phone number (e.g. `+96170178043`)
-
-The portal needs a **Supabase Auth account** (in `auth.users`) for each parent — separate from the `public.users` row.
-
-### Auto-registration on first login
-`parent_portal.html` now auto-creates the Supabase Auth account on first login:
-1. Parent enters email + phone number
-2. If Supabase Auth account doesn't exist → `signUp()` is called automatically
-3. On next visit (or after admin confirms the email) → normal `signIn()` succeeds
-
-### Admin tool: create_auth.html
-Open `create_auth.html` to manage parent Auth accounts:
-
-| Method | How | When to use |
-|---|---|---|
-| **A — Auto** (recommended) | `signUp()` via anon key, then confirm SQL | Quickest, no service key needed |
-| **B — SQL** | Direct `INSERT` into `auth.users` | When email confirmation is disabled in Supabase |
-
-After running Method A, run the **Confirm SQL** in Supabase SQL Editor:
-```sql
-UPDATE auth.users
-SET email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
-    updated_at = NOW()
-WHERE email IN ('isystemslb@gmail.com', 'ritanesbay@gmail.com' /*, ... */);
+### The critical invariant
 ```
+parent_notifications.parent_user_id  =  auth.users.id  =  public.users.auth_id
+```
+If `public.users.auth_id` is NULL or wrong, the parent never sees the push — **silently**.
+
+### How `auth_id` is set — automatically (no manual SQL needed)
+
+| When | What happens |
+|---|---|
+| **New parent created** in admin portal (Users → Add) | `signUp()` called → `auth_id` returned → saved to `public.users.auth_id` immediately |
+| **Parent already has Supabase Auth account** (email already registered) | Admin API `listUsers()` used to resolve the real UUID → saved to `public.users.auth_id` |
+| **Parent email changed** | Old auth account deleted, new one created via Admin API, `auth_id` updated |
+
+All 3 cases are handled automatically in `saveUser()` → `_createParentAuthAccount()`.
+
+### What happens if `auth_id` is still NULL (legacy parents)
+
+Fix options in order of preference:
+1. **Admin portal → Users → edit the parent → Save** — triggers auto-resolution
+2. **`fix_parent_auth.html`** — bulk diagnostic & repair tool
+3. **SQL** (last resort):
+```sql
+UPDATE public.users
+SET auth_id = (SELECT id FROM auth.users WHERE email = public.users.email LIMIT 1)
+WHERE user_type = 'parent'
+  AND auth_id IS NULL
+  AND email IS NOT NULL;
+```
+
+### Push safety rules in the codebase
+
+| Location | Rule |
+|---|---|
+| `notifications.js` — broadcast push | Uses **only** `users.auth_id`. Never falls back to `users.id` (different UUID, causes unreadable rows) |
+| `notifications.js` — `triggerRule()` target=parent | Looks up `parent.auth_id` via `parent_id` FK. If parent not found → skips entirely (no wrong-recipient fallback) |
+| `notifications.js` — `triggerRule()` target=parent | If `parentContact` is null → `contacts = []` → no channels fire (safe skip, logged) |
+| `users.js` — `_createParentAuthAccount()` | On `alreadyExists` → resolves UUID via Admin API, saves to DB immediately |
+
+### Diagnostic tool
+**`test_notifications.html`** — 5-step push diagnostic:
+1. Verify `auth_id` present in `public.users`
+2. Inspect `parent_notifications` schema (all columns)
+3. Test INSERT with full error surfacing
+4. Read back to confirm the row was written
+5. Compare with Supabase Auth Admin API (UUID match check)
 
 ### Files
 ```
-parent_portal.html       Parent-facing portal (login + children/attendance/packages)
-js/parent_portal.js      Portal logic
-create_auth.html         Admin tool to create/confirm parent Auth accounts
+test_notifications.html    Full notification diagnostic + send test tool (v5)
+fix_parent_auth.html       Bulk auth_id repair tool for existing parents
 ```
+
+---
+
+## 👨‍👩‍👧 Parent Portal
+
+The parent-facing app is a **third-party application** (not `parent_portal.html`).  
+It reads `parent_notifications` filtered by `auth.uid()` to display push notifications.  
+`parent_portal.html` in this repo is a legacy stub and is not in active use.
 
 ---
 
