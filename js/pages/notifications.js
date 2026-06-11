@@ -1051,17 +1051,25 @@ const NotificationsPage = {
     if (!matchingRules.length) return; // no active rule for this event — silent exit
 
     // Build template variables from data
+    // student_fname / student_name: resolved from data directly so they are never empty
+    // when the caller passes data.full_name (student's name) and the contact later becomes
+    // a parent, these remain the student's name throughout the template rendering.
+    const _studentFname = data.fname || data.full_name?.split(' ')[0] || '';
+    const _studentName  = data.full_name || '';
     const vars = {
-      fname:        data.fname        || data.full_name?.split(' ')[0] || '',
-      lname:        data.lname        || data.full_name?.split(' ').slice(1).join(' ') || '',
-      full_name:    data.full_name    || '',
-      email:        data.email        || '',
-      phone:        data.phone        || '',
-      package:      data.package      || '',
-      amount:       data.amount       !== undefined ? String(data.amount) : '',
-      start_date:   data.start_date   ? Utils.formatDate(data.start_date)   : '',
-      end_date:     data.end_date     ? Utils.formatDate(data.end_date)     : '',
-      expiry_date:  data.end_date     ? Utils.formatDate(data.end_date)     : '',
+      fname:         _studentFname,
+      lname:         data.lname        || data.full_name?.split(' ').slice(1).join(' ') || '',
+      full_name:     _studentName,
+      email:         data.email        || '',
+      phone:         data.phone        || '',
+      package:       data.package      || '',
+      amount:        data.amount       !== undefined ? String(data.amount) : '',
+      start_date:    data.start_date   ? Utils.formatDate(data.start_date)   : '',
+      end_date:      data.end_date     ? Utils.formatDate(data.end_date)     : '',
+      expiry_date:   data.end_date     ? Utils.formatDate(data.end_date)     : '',
+      // Always carry student identity — overridden per contact below but preserved here
+      student_fname: data.student_fname || _studentFname,
+      student_name:  data.student_name  || _studentName,
     };
 
     for (const rule of matchingRules) {
@@ -1142,15 +1150,18 @@ const NotificationsPage = {
         const notifType = this._triggerToType(triggerEvent);
 
         for (const contact of contacts) {
-          // Merge contact vars so {fname} etc. resolve to the actual recipient
-          // student_fname / student_name are preserved from vars BEFORE overwriting with parent name
+          // Merge contact vars so {fname} etc. resolve to the actual recipient.
+          // student_fname / student_name are locked to the STUDENT's name before
+          // fname / full_name are overwritten with the parent's name.
+          const _sf = vars.student_fname || vars.fname;     // student first name
+          const _sn = vars.student_name  || vars.full_name; // student full name
           const contactVars = {
             ...vars,
-            fname:         contact.name.split(' ')[0] || vars.fname,
-            lname:         contact.name.split(' ').slice(1).join(' ') || vars.lname,
+            fname:         (contact.name.split(' ')[0]) || vars.fname,
+            lname:         (contact.name.split(' ').slice(1).join(' ')) || vars.lname,
             full_name:     contact.name || vars.full_name,
-            student_fname: vars.fname,       // student's first name — unchanged even when contact = parent
-            student_name:  vars.full_name,   // student's full name  — unchanged even when contact = parent
+            student_fname: _sf,   // always the student's first name
+            student_name:  _sn,   // always the student's full name
           };
           const body = this._fillTemplate(
             template || this._defaultTriggerMsg(triggerEvent, contactVars), contactVars
@@ -1307,14 +1318,20 @@ const NotificationsPage = {
         const key = `${student.id}__${alloc.end_date}`;
         if (alreadySent.has(key)) continue;
 
+        // Capture student name ONCE here — before any contact-level overwrite
+        const _expiryStudentFname = student.full_name?.split(' ')[0] || '';
+        const _expiryStudentName  = student.full_name || '';
         const baseVars = {
-          fname:       student.full_name?.split(' ')[0] || '',
-          lname:       student.full_name?.split(' ').slice(1).join(' ') || '',
-          full_name:   student.full_name || '',
-          package:     alloc.package?.name || '',
-          expiry_date: Utils.formatDate(alloc.end_date),
-          days_left:   String(Math.ceil((new Date(alloc.end_date) - new Date()) / 86400000)),
-          end_date:    Utils.formatDate(alloc.end_date),
+          fname:         _expiryStudentFname,
+          lname:         student.full_name?.split(' ').slice(1).join(' ') || '',
+          full_name:     _expiryStudentName,
+          package:       alloc.package?.name || '',
+          expiry_date:   Utils.formatDate(alloc.end_date),
+          days_left:     String(Math.ceil((new Date(alloc.end_date) - new Date()) / 86400000)),
+          end_date:      Utils.formatDate(alloc.end_date),
+          // Pre-populate so even if contact loop skips, vars always resolve
+          student_fname: _expiryStudentFname,
+          student_name:  _expiryStudentName,
         };
 
         // Build contacts list based on recipient_target — userId MUST be auth_id (Supabase auth.uid())
@@ -1362,8 +1379,10 @@ const NotificationsPage = {
               ...baseVars,
               fname:         contact.name?.split(' ')[0] || baseVars.fname,
               full_name:     contact.name || baseVars.full_name,
-              student_fname: baseVars.fname,      // always = student first name
-              student_name:  baseVars.full_name,  // always = student full name
+              // student_fname / student_name come from baseVars (already set to student)
+              // Use || fallback so an empty string also falls back to baseVars
+              student_fname: baseVars.student_fname || baseVars.fname,
+              student_name:  baseVars.student_name  || baseVars.full_name,
             };
             const template = ch === 'push'
               ? (rule.push_template || rule.email_template)
@@ -1541,16 +1560,22 @@ const NotificationsPage = {
           const dedupKey = `${student.id}__${slot.level_id}__${slotKey}__${todayDateStr}`;
           if (alreadySent.has(dedupKey)) continue;
 
+          // Capture student name ONCE — before any contact-level overwrite
+          const _classStudentFname = student.full_name?.split(' ')[0] || '';
+          const _classStudentName  = student.full_name || '';
           // Build base template vars
           const baseVars = {
-            fname:       student.full_name?.split(' ')[0] || '',
-            lname:       student.full_name?.split(' ').slice(1).join(' ') || '',
-            full_name:   student.full_name || '',
-            level_name:  levelName,
-            class_name:  levelName,          // alias
-            course_name: courseName,
-            class_time:  classTime,
-            class_day:   classDay,
+            fname:         _classStudentFname,
+            lname:         student.full_name?.split(' ').slice(1).join(' ') || '',
+            full_name:     _classStudentName,
+            level_name:    levelName,
+            class_name:    levelName,          // alias
+            course_name:   courseName,
+            class_time:    classTime,
+            class_day:     classDay,
+            // Pre-populate so vars always resolve even before contact loop
+            student_fname: _classStudentFname,
+            student_name:  _classStudentName,
           };
 
           // Resolve parent contact if needed
@@ -1605,8 +1630,10 @@ const NotificationsPage = {
                 ...baseVars,
                 fname:         contact.name?.split(' ')[0] || baseVars.fname,
                 full_name:     contact.name || baseVars.full_name,
-                student_fname: baseVars.fname,      // always = student first name
-                student_name:  baseVars.full_name,  // always = student full name
+                // student_fname / student_name come from baseVars (already set to student)
+                // Use || fallback so an empty string also falls back correctly
+                student_fname: baseVars.student_fname || baseVars.fname,
+                student_name:  baseVars.student_name  || baseVars.full_name,
               };
               const defaultMsg = `Hi ${vars.fname}, reminder: ${vars.student_fname}'s ${vars.level_name} class` +
                 (vars.course_name ? ` (${vars.course_name})` : '') +
@@ -1666,7 +1693,15 @@ const NotificationsPage = {
   },
 
   _fillTemplate(template, vars) {
-    return template.replace(/\{(\w+)\}/g, (_, k) => vars[k] ?? `{${k}}`);
+    // Replace {placeholder} with vars[placeholder].
+    // Use || instead of ?? so that empty strings ('') also trigger the fallback
+    // to the original placeholder — making it visible in logs when a value is missing.
+    return template.replace(/\{(\w+)\}/g, (match, k) => {
+      const val = vars[k];
+      // null / undefined / empty string → keep placeholder visible (easier to debug)
+      if (val === null || val === undefined || val === '') return match;
+      return String(val);
+    });
   },
 
   _defaultExpiryMsg(vars) {
