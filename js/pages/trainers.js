@@ -708,8 +708,18 @@ const TrainersPage = {
     const sessionRows = (sessions || []).map(s => {
       const fee = s.fee_override != null ? Number(s.fee_override) : Number(trainer.fee_session || 0);
       const cost = fee * (s.sessions_count || 1);
+      const isPaid = !!s.is_paid;
+      const paidBtn = isPaid
+        ? `<button class="btn btn-sm" style="background:#22c55e;color:#fff;border:none;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px;font-weight:600;min-width:74px"
+             onclick="TrainersPage.toggleSessionPaid('${s.id}',true,'${trainerId}')">
+             ✅ Paid
+           </button>`
+        : `<button class="btn btn-sm" style="background:#e5e7eb;color:#6b7280;border:none;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px;font-weight:600;min-width:74px"
+             onclick="TrainersPage.toggleSessionPaid('${s.id}',false,'${trainerId}')">
+             ○ Unpaid
+           </button>`;
       return `
-        <tr>
+        <tr style="${isPaid ? 'opacity:0.55' : ''}">
           <td style="padding:8px 6px;font-size:var(--font-size-sm)">${Utils.formatDate(s.session_date)}</td>
           <td style="padding:8px 6px;font-size:var(--font-size-sm)">${Utils.esc(s.level?.name || '—')}</td>
           <td style="padding:8px 6px;font-size:var(--font-size-sm)">${Utils.esc(s.level?.course?.name || '—')}</td>
@@ -717,7 +727,8 @@ const TrainersPage = {
             <span class="badge ${s.attended ? 'badge-green' : 'badge-red'}">${s.attended ? 'Present' : 'Absent'}</span>
           </td>
           <td style="padding:8px 6px;text-align:center;font-size:var(--font-size-sm)">${s.sessions_count || 1}</td>
-          <td style="padding:8px 6px;text-align:right;font-size:var(--font-size-sm);font-weight:600;color:var(--brand-primary)">${Utils.formatCurrency(cost)}</td>
+          <td style="padding:8px 6px;text-align:right;font-size:var(--font-size-sm);font-weight:600;color:${isPaid ? '#9ca3af' : 'var(--brand-primary)'}">${Utils.formatCurrency(cost)}</td>
+          <td style="padding:8px 6px;text-align:center">${paidBtn}</td>
           <td style="padding:8px 6px;text-align:center">
             <button class="btn btn-ghost btn-icon btn-sm" onclick="TrainersPage._deleteSession('${s.id}','${trainerId}')">
               <i class="fas fa-trash" style="color:var(--brand-danger)"></i>
@@ -729,6 +740,11 @@ const TrainersPage = {
 
     const totalSessions = (sessions || []).filter(s => s.attended).reduce((a, s) => a + (s.sessions_count || 1), 0);
     const totalCost = (sessions || []).reduce((a, s) => {
+      const fee = s.fee_override != null ? Number(s.fee_override) : Number(trainer.fee_session || 0);
+      return a + fee * (s.sessions_count || 1);
+    }, 0);
+    // Amount due = unpaid sessions only
+    const amountDue = (sessions || []).filter(s => !s.is_paid).reduce((a, s) => {
       const fee = s.fee_override != null ? Number(s.fee_override) : Number(trainer.fee_session || 0);
       return a + fee * (s.sessions_count || 1);
     }, 0);
@@ -761,7 +777,7 @@ const TrainersPage = {
             <input type="number" name="sessions_count" class="form-input" value="1" min="1" max="20" />
           </div>
           <div class="form-group" style="margin:0">
-            <label class="form-label">Fee Override ($) <span style="font-size:10px;color:var(--text-muted)">(blank = default)</span></label>
+            <label class="form-label">Fee Override ($) <span style="font-size:10px;color:var(--text-muted)">(blank = current rate: ${Utils.formatCurrency(trainer.fee_session || 0)})</span></label>
             <input type="number" name="fee_override" class="form-input" step="0.01" placeholder="${trainer.fee_session || 0}" />
           </div>
         </div>
@@ -784,7 +800,7 @@ const TrainersPage = {
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
         ${[
           { label: 'Sessions attended', val: totalSessions, color: '#22c55e' },
-          { label: 'Total cost', val: Utils.formatCurrency(totalCost), color: '#6366f1' },
+          { label: 'Amount due (unpaid)', val: Utils.formatCurrency(amountDue), color: '#6366f1' },
           { label: 'Default fee', val: Utils.formatCurrency(trainer.fee_session || 0) + ' / session', color: '#f59e0b' },
         ].map(c => `
           <div style="flex:1;min-width:130px;padding:10px 14px;border-radius:var(--radius-md);
@@ -808,6 +824,7 @@ const TrainersPage = {
                 <th style="padding:6px;text-align:center">Status</th>
                 <th style="padding:6px;text-align:center">Sessions</th>
                 <th style="padding:6px;text-align:right">Cost</th>
+                <th style="padding:6px;text-align:center">Paid</th>
                 <th style="padding:6px"></th>
               </tr>
             </thead>
@@ -825,14 +842,25 @@ const TrainersPage = {
     data.trainer_id     = trainerId;
     data.attended       = fd.has('attended');
     data.sessions_count = parseInt(data.sessions_count) || 1;
-    data.fee_override   = data.fee_override !== '' ? parseFloat(data.fee_override) : null;
+
+    // ── Snapshot the fee at insert time ──────────────────────────────────────
+    // If the user left "Fee Override" blank, we still store the trainer's
+    // current fee_session as fee_override so that future fee changes on the
+    // trainer profile never alter the cost of already-logged sessions.
+    // If the user typed an explicit override, we honour that value instead.
+    const trainer = this.trainers.find(t => t.id === trainerId);
+    if (data.fee_override !== '') {
+      data.fee_override = parseFloat(data.fee_override);
+    } else {
+      data.fee_override = parseFloat(trainer?.fee_session || 0);
+    }
+
     if (!data.notes) data.notes = null;
 
     try {
       const { error } = await DB.createTrainerSession(data);
       if (error) throw error;
       Toast.success('Session logged!');
-      const trainer = this.trainers.find(t => t.id === trainerId);
       await this._renderAttendanceModal(trainerId, trainer);
     } catch (err) { Toast.error(err.message || 'Failed to log session'); }
   },
@@ -842,6 +870,15 @@ const TrainersPage = {
     const { error } = await DB.deleteTrainerSession(sessionId);
     if (error) return Toast.error(error.message);
     Toast.success('Session removed');
+    const trainer = this.trainers.find(t => t.id === trainerId);
+    await this._renderAttendanceModal(trainerId, trainer);
+  },
+
+  async toggleSessionPaid(sessionId, currentPaid, trainerId) {
+    const newPaid = !currentPaid;
+    const { error } = await DB.updateTrainerSession(sessionId, { is_paid: newPaid });
+    if (error) return Toast.error(error.message);
+    Toast.success(newPaid ? 'Marked as paid ✅' : 'Marked as unpaid');
     const trainer = this.trainers.find(t => t.id === trainerId);
     await this._renderAttendanceModal(trainerId, trainer);
   },
