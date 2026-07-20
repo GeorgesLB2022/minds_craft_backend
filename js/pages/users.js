@@ -584,6 +584,11 @@ const UsersPage = {
     // Clean empty strings
     Object.keys(data).forEach(k => { if (data[k] === '') data[k] = null; });
 
+    // ── Normalize email to lowercase ─────────────────────────────────────
+    // Supabase Auth always stores emails in lowercase. public.users must match
+    // exactly, otherwise the third-party app fetch by email returns 0 rows.
+    if (data.email) data.email = data.email.trim().toLowerCase();
+
     data.avatar_color = Utils.avatarColor(data.full_name);
     if (!data.avatar_url) data.avatar_url = null;
 
