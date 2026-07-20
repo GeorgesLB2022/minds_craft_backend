@@ -399,7 +399,7 @@ const CoursesPage = {
     const [
       { data: enrollments, error: enrErr },
       { data: allStudents, error: stuErr },
-      { data: levelSlots },
+      { data: rawLevelSlots },
       { data: completions },
     ] = await Promise.all([
       DB.getLevelEnrollments(levelId),
@@ -411,6 +411,24 @@ const CoursesPage = {
     if (enrErr || stuErr) {
       panel.innerHTML = `<div class="alert alert-error">Failed to load student data.</div>`;
       return;
+    }
+
+    // If level_schedules table has no rows for this level, fall back to the
+    // legacy day_of_week / start_time / end_time columns on the level record itself.
+    // This handles levels that were created before the level_schedules table existed.
+    let levelSlots = rawLevelSlots || [];
+    if (levelSlots.length === 0) {
+      const lv = this._levels?.find(l => l.id === levelId);
+      if (lv?.day_of_week) {
+        levelSlots = [{
+          id:          null,
+          level_id:    levelId,
+          day_of_week: lv.day_of_week,
+          start_time:  lv.start_time || null,
+          end_time:    lv.end_time   || null,
+          label:       null,
+        }];
+      }
     }
 
     // Only show active/inactive/dropped enrollments in "In Progress" tab
