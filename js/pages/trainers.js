@@ -867,6 +867,13 @@ const TrainersPage = {
 
   async _deleteSession(sessionId, trainerId) {
     if (!confirm('Remove this session log?')) return;
+
+    // Also remove the linked expense transaction if one exists
+    const tag = `[trainer_session:${sessionId}]`;
+    const { data: allTx } = await DB.getTransactions({ limit: 1000 });
+    const linked = (allTx || []).find(t => (t.description || '').includes(tag));
+    if (linked) await DB.deleteTransaction(linked.id);
+
     const { error } = await DB.deleteTrainerSession(sessionId);
     if (error) return Toast.error(error.message);
     Toast.success('Session removed');
@@ -876,10 +883,59 @@ const TrainersPage = {
 
   async toggleSessionPaid(sessionId, currentPaid, trainerId) {
     const newPaid = !currentPaid;
-    const { error } = await DB.updateTrainerSession(sessionId, { is_paid: newPaid });
-    if (error) return Toast.error(error.message);
-    Toast.success(newPaid ? 'Marked as paid ✅' : 'Marked as unpaid');
     const trainer = this.trainers.find(t => t.id === trainerId);
+
+    // ── 1. Update is_paid flag on the session row ───────────────────────────
+    const { error: updateErr } = await DB.updateTrainerSession(sessionId, { is_paid: newPaid });
+    if (updateErr) return Toast.error(updateErr.message);
+
+    // ── 2a. PAID → create an expense transaction ────────────────────────────
+    if (newPaid) {
+      // Fetch the full session to get its fee & date
+      const { data: session, error: fetchErr } = await DB.getOne('trainer_sessions', sessionId);
+      if (fetchErr || !session) {
+        Toast.warning('Paid toggled but could not fetch session for transaction.');
+        const t = trainer; await this._renderAttendanceModal(trainerId, t); return;
+      }
+      const fee  = session.fee_override != null
+        ? Number(session.fee_override)
+        : Number(trainer?.fee_session || 0);
+      const cost = fee * (session.sessions_count || 1);
+
+      const txData = {
+        type:        'expense',
+        amount:      cost,
+        date:        session.session_date || Utils.todayISO(),
+        category:    'Salary',
+        user_entity: trainer?.full_name || null,
+        description: `Trainer fee — ${trainer?.full_name || 'Trainer'} [trainer_session:${sessionId}]`,
+        method:      'cash',
+        status:      'completed',
+      };
+      const { error: txErr } = await DB.createTransaction(txData);
+      if (txErr) {
+        Toast.warning('Session marked paid but expense transaction failed: ' + txErr.message);
+      } else {
+        Toast.success('Marked as paid ✅ — expense recorded in Financials');
+      }
+
+    // ── 2b. UNPAID → delete the linked expense transaction ──────────────────
+    } else {
+      const tag = `[trainer_session:${sessionId}]`;
+      const { data: allTx } = await DB.getTransactions({ limit: 1000 });
+      const linked = (allTx || []).find(t => (t.description || '').includes(tag));
+      if (linked) {
+        const { error: delErr } = await DB.deleteTransaction(linked.id);
+        if (delErr) {
+          Toast.warning('Session marked unpaid but could not remove expense: ' + delErr.message);
+        } else {
+          Toast.success('Marked as unpaid — expense removed from Financials');
+        }
+      } else {
+        Toast.success('Marked as unpaid');
+      }
+    }
+
     await this._renderAttendanceModal(trainerId, trainer);
   },
 
